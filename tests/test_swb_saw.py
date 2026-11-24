@@ -208,8 +208,8 @@ def fake_swb(monkeypatch, saw_oft):
     return calls
 
 
-_METHODS = ("_swb_source_split", "_swb_saw_kwargs", "_swb_solve", "_swb_split", "_swb_state",
-            "_swb_imas_baseline", "_verify_sigma0_swb", "_zeff_eq")
+_METHODS = ("_swb_source_split", "_swb_saw_kwargs", "_swb_solve", "_swb_solve_once", "_swb_split",
+            "_swb_state", "_swb_imas_baseline", "_verify_sigma0_swb", "_zeff_eq")
 
 
 def _run(**gen):
@@ -589,3 +589,50 @@ def test_the_swb_split_is_archived_as_the_third_bucket(tmp_path):
             assert g.attrs[CURRENT_SPLIT_CONVENTION_ATTR] == SPLIT_PRESSURE_SEPARATE
             np.testing.assert_array_equal(g["jphi_pd"][()], exp)
         assert hf["scan/k/3"].attrs["swb_ip_rel_err"] == 1e-5
+
+
+# ---- pressure flattening inside rho_m (swb_saw_flatten) ----------------------
+def _kin(x):
+    ne = 1.0 + (1.0 - x) ** 2
+    return dict(ne=ne, te=2.0 - x, ni=0.9 * ne, ti=1.5 - x, Zeff=1.5 + 0.2 * x, p_fixed=1.0 - x)
+
+
+def test_flatten_rules_keep_the_edge_value_or_the_content():
+    x = np.linspace(0.0, 1.0, 2001)
+    V = x ** 1.5                                   # any enclosed volume, 0 on the axis
+    kin, x_m = _kin(x), 0.3
+    inside = x < x_m
+    val = swb_mod.swb_saw_flatten(kin, x, V, x_m, "value")
+    vol = swb_mod.swb_saw_flatten(kin, x, V, x_m, "volume")
+    for k, v in kin.items():
+        assert np.allclose(val[k][inside], np.interp(x_m, x, v))
+        assert np.array_equal(val[k][~inside], v[~inside]) and np.array_equal(vol[k][~inside], v[~inside])
+        assert np.ptp(vol[k][inside]) == 0.0
+    S = lambda a: np.trapezoid(np.where(inside, a, 0.0), V)          # noqa: E731
+    for a, b in (("ne", None), ("ni", None), ("p_fixed", None), ("ne", "te"), ("ni", "ti"), ("ne", "Zeff")):
+        f = lambda d: d[a] * (d[b] if b else 1.0)                    # noqa: E731
+        assert S(f(vol)) == pytest.approx(S(f(kin)), rel=2e-3)       # particles, energy, sum n Z^2 kept
+
+
+def test_flatten_repeats_until_rho_m_settles(monkeypatch):
+    x = np.linspace(0.0, 1.0, 101)
+    rhos, seen = iter([0.3, 0.32, 0.3205]), []
+
+    def once(kin, j_seed, coil_reg_target, warm_eq):
+        seen.append(kin)
+        return {"saw_rho_m": next(rhos), "saw_n_dips": 1}
+
+    monkeypatch.setattr(swb_mod, "_swb_volume", lambda mygs, x, coord: x)
+    stub = types.SimpleNamespace(config=types.SimpleNamespace(generation=GenerationConfig(
+        swb_saw_q=1.02, swb_saw_flatten="value")), baseline=types.SimpleNamespace(psi_N=x, coord="phi_n"),
+        mygs=None, _swb_solve_once=once)
+    res = Bouquet._swb_solve(stub, _kin(x), np.ones_like(x))
+    assert len(seen) == 3 and seen[0]["ne"][0] == _kin(x)["ne"][0]   # first solve unflattened
+    assert res["saw_flat"]["rho_m"] == 0.32 and res["saw_flat"]["repeats"] == 2
+    assert np.allclose(seen[2]["ne"][x < 0.32 ** 2], np.interp(0.32 ** 2, x, _kin(x)["ne"]))
+
+
+def test_flatten_needs_the_reset():
+    assert any("swb_saw_flatten needs" in m for m in swb_config_problems(_cfg(swb_saw_flatten="value")))
+    with pytest.raises(ValueError, match="swb_saw_flatten"):
+        GenerationConfig(swb_saw_flatten="mean")

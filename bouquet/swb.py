@@ -33,6 +33,42 @@ _SWB_SAW_KEYS = ("jphi_saw_out", "saw_rho_m", "saw_rho_out", "saw_n_dips")
 #: swb_saw_q: with no reset (saw_n_dips 0) warn when max|jphi_saw_out - jphi_saw| exceeds
 #: this fraction of max|jphi_total| (an OFT mis-mapping jphi_saw; also frozen-saw reporting).
 SWB_SAW_MAP_TOL = 1e-3
+#: swb_saw_flatten: the solve is repeated until rho_m moves by at most this, at most SWB_FLAT_MAXIT times.
+SWB_FLAT_TOL = 1e-3
+SWB_FLAT_MAXIT = 6
+#: swb_saw_flatten "volume": profiles averaged with a density weight (T_e: n_e T_e, T_i: n_i T_i, Z_eff: n_e Z_eff).
+_FLAT_WEIGHT = {"te": "ne", "ti": "ni", "Zeff": "ne"}
+
+
+def swb_saw_flatten(kin, x, V, x_m, rule):
+    """``kin`` (``ne te ni ti Zeff p_fixed`` on the grid ``x``) made flat inside
+    ``x_m`` (``GenerationConfig.swb_saw_flatten``).  ``"value"``: each at its
+    value at ``x_m``.  ``"volume"``: the volume averages over ``x <= x_m`` (``V``
+    the enclosed volume on ``x``, any constant factor, 0 on the axis) of n_e,
+    n_i, n_e T_e, n_i T_i, n_e Z_eff and p_fixed, so the particles, the stored
+    energy and sum n Z^2 inside ``x_m`` are kept."""
+    x = np.asarray(x, dtype=float)
+    kin = {k: np.asarray(v, dtype=float) for k, v in kin.items()}
+    inside = x < x_m
+    if rule == "value":
+        flat = {k: float(np.interp(x_m, x, v)) for k, v in kin.items()}
+    else:
+        xs = np.r_[x[inside], x_m]
+        Vs = np.interp(xs, x, np.asarray(V, dtype=float))
+        avg = lambda a: float(np.trapezoid(np.interp(xs, x, a), Vs) / Vs[-1])   # noqa: E731
+        flat = {k: (avg(kin[_FLAT_WEIGHT[k]] * v) / avg(kin[_FLAT_WEIGHT[k]]) if k in _FLAT_WEIGHT
+                    else avg(v)) for k, v in kin.items()}
+    return {k: np.where(inside, flat[k], v) for k, v in kin.items()}
+
+
+def _swb_volume(mygs, x, coord):
+    """Enclosed volume (up to a constant factor) on the run grid ``x`` of
+    ``mygs``'s last solve."""
+    from .physics import q_ravg
+    pn = np.clip(np.asarray(coords.psi_at(mygs, x, coord), dtype=float), 1e-4, 1.0 - 1e-4)
+    _, _, geo, *_ = mygs.get_q(psi=pn, compute_geo=True)
+    w = np.abs(np.asarray(q_ravg(geo, "dV/dPsi"), dtype=float))
+    return np.r_[0.0, np.cumsum(0.5 * (w[1:] + w[:-1]) * np.diff(pn))]
 
 
 def swb_source_edge(x, seed, *others):
@@ -172,6 +208,38 @@ class SwbBaseline:
                     saw_rule=SWB_SAW_RULES[gc.swb_saw_rule])
 
     def _swb_solve(self, kin, j_seed, coil_reg_target=None, warm_eq=None):
+        """:meth:`_swb_solve_once`; with ``swb_saw_flatten``, repeated on the
+        kinetics flattened inside the last solve's rho_m (:func:`swb_saw_flatten`)
+        until rho_m settles.  The result then carries ``saw_flat``: the rule,
+        the rho_m flattened inside, the repeats and (when flattened) the
+        flattened ``kin``, its edge ``x_m`` and the volume ``V`` on ``psi_N``."""
+        res = self._swb_solve_once(kin, j_seed, coil_reg_target, warm_eq)
+        rule = self.config.generation.swb_saw_flatten
+        if rule is None:
+            return res
+        x = np.asarray(self.baseline.psi_N, dtype=float)
+        coord = getattr(self.baseline, "coord", coords.PSI)
+        rho_used, flat = None, None
+        for n in range(SWB_FLAT_MAXIT + 1):
+            rho = float(res.get("saw_rho_m") or 0.0) if res.get("saw_n_dips") else 0.0
+            if rho <= 0.0 or (rho_used is not None and abs(rho - rho_used) <= SWB_FLAT_TOL):
+                break
+            if n == SWB_FLAT_MAXIT:
+                import warnings
+                warnings.warn(f"swb_saw_flatten: rho_m {rho_used:.4f} -> {rho:.4f} after "
+                              f"{n} repeats (tol {SWB_FLAT_TOL:g})", RuntimeWarning, stacklevel=2)
+                break
+            x_m = (rho * rho if coords.check_coord(coord) == coords.PHI
+                   else float(coords.psi_at(self.mygs, [rho * rho], coords.PHI)[0]))
+            V = _swb_volume(self.mygs, x, coord)
+            flat = swb_saw_flatten(kin, x, V, x_m, rule)
+            rho_used = rho
+            res = self._swb_solve_once(flat, j_seed, coil_reg_target, warm_eq)
+        res["saw_flat"] = dict(rule=rule, rho_m=rho_used, repeats=n, kin=flat,
+                               **({} if flat is None else dict(x_m=x_m, V=V)))
+        return res
+
+    def _swb_solve_once(self, kin, j_seed, coil_reg_target=None, warm_eq=None):
         """The swb recipe: reset ``mygs`` -> coil reg -> ``init_psi`` from the
         slice LCFS -> one ``solve_with_bootstrap``.
 

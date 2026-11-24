@@ -156,6 +156,12 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
                    None if z_fast is None else _kin_to_eq(np.asarray(z_fast, dtype=float)),
                    Z_imp))
     res = swb_recipe(kin, j_seed)
+    flat = res.get("saw_flat") or {}
+    if flat.get("kin") is not None:   # swb_saw_flatten: the kinetics the solve used, kinetic grid too
+        from .swb import swb_saw_flatten
+        f = swb_saw_flatten(dict(ne=ne_p, te=te_p, ni=ni_p, ti=ti_p), psi_kin,
+                            np.interp(psi_kin, psi_N, flat["V"]), flat["x_m"], flat["rule"])
+        ne_p, te_p, ni_p, ti_p = f["ne"], f["te"], f["ni"], f["ti"]
     # the recipe returns bouquet's split (Bouquet._swb_split): jphi_bs the
     # field-aligned bootstrap, jphi_pd the third bucket, SWB's own
     # inductive (alpha's) as swb_raw_jphi_ind
@@ -198,6 +204,9 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
             diagnostics["saw_rho_out"] = float(res["saw_rho_out"])
         if res.get("saw_map_warn") is not None:
             diagnostics["saw_map_warn"] = bool(res["saw_map_warn"])
+    if flat:
+        diagnostics.update(saw_flat_rho_m=flat["rho_m"], saw_flat_repeats=flat["repeats"],
+                           swb_p_fixed=None if flat.get("kin") is None else flat["kin"]["p_fixed"])
     return (ne_p, te_p, ni_p, ti_p, np.zeros_like(psi_N),
             np.asarray(res["jphi_total"], dtype=float), diagnostics)
 
@@ -273,7 +282,14 @@ class SwbDraws(DrawMethod):
             jind_clip=self.jind_clip)
         if self.core_bands is not None:
             self._judge_core(out[5], out[6])
+        self._p_fixed = out[6].pop("swb_p_fixed", None)
         return out
+
+    def stored_pressures(self, thermal, total):
+        """With ``swb_saw_flatten``, the total the flattened solve used: the
+        (flattened) thermal plus its flattened ``p_fixed``."""
+        p = getattr(self, "_p_fixed", None)
+        return thermal, (total if p is None else thermal + p)
 
     def _judge_core(self, jphi_total, diagnostics):
         """The core-current checks on the draw's solved jphi_total: the band
@@ -339,6 +355,8 @@ class SwbDraws(DrawMethod):
             "swb_saw_rho_out": diagnostics.get("saw_rho_out"),
             "swb_saw_n_dips": diagnostics.get("saw_n_dips"),
             "swb_saw_map_warn": diagnostics.get("saw_map_warn"),
+            "swb_saw_flat_rho_m": diagnostics.get("saw_flat_rho_m"),
+            "swb_saw_flat_repeats": diagnostics.get("saw_flat_repeats"),
             **(diagnostics.get("core_band_attrs") or {})})
 
     # ---- Bouquet.generate -------------------------------------------------

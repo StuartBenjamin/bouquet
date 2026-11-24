@@ -1677,6 +1677,14 @@ class GenerationConfig:
     swb_saw_tol: float = 1.0e-4
     swb_saw_ramp: float = 0.01
     swb_saw_rule: str = "local"
+    # swb_saw_q only.  Pressure flattening inside the reset's mixing radius
+    # rho_m (swb.swb_saw_flatten): n_e, T_e, n_i, T_i, Z_eff and p_fixed
+    # (fast + impurity) made flat inside rho_m of the solve, which is then
+    # repeated until rho_m settles.  "value": each at its value at rho_m;
+    # "volume": volume averages (densities, n T and p_fixed; Z_eff weighted
+    # by n_e), so particles and stored energy inside rho_m are kept.  None:
+    # off.
+    swb_saw_flatten: Optional[str] = None
     # swb only.  OFT interpolation of the inductive jphi profile between its
     # nodes (OFT profile key 'interp'; P' inherits it): "cubic" (C2 spline;
     # an OFT with c2_profile_interp, the internal solve) or "linterp"; None
@@ -2171,6 +2179,8 @@ class GenerationConfig:
             raise ValueError(f"swb_saw_ramp={self.swb_saw_ramp!r} must be >= 0")
         if self.swb_saw_rule not in SWB_SAW_RULES:
             raise ValueError(f"swb_saw_rule={self.swb_saw_rule!r} not in {tuple(SWB_SAW_RULES)}")
+        if self.swb_saw_flatten not in (None, "value", "volume"):
+            raise ValueError(f"swb_saw_flatten={self.swb_saw_flatten!r} not in (None, 'value', 'volume')")
         if self.swb_jind_interp not in (None, "linterp", "cubic"):
             raise ValueError(f"swb_jind_interp={self.swb_jind_interp!r} not in (None, 'linterp', 'cubic')")
         _t = self.swb_ip_tol
@@ -2536,6 +2546,8 @@ def swb_config_problems(config):
     from .coords import _swb_grid_arg, _swb_params
     if not _swb_grid_arg() or not {"jphi_fixed", "p_fixed"} <= _swb_params():
         p.append("this OpenFUSIONToolkit's solve_with_bootstrap lacks x/jphi_fixed/p_fixed")
+    if gc.swb_saw_flatten is not None and gc.swb_saw_q is None:
+        p.append("swb_saw_flatten needs the sawtooth reset (swb_saw_q)")
     if gc.swb_saw_q is not None and "jphi_saw" not in _swb_params():
         p.append("swb_saw_q: this OpenFUSIONToolkit's solve_with_bootstrap lacks jphi_saw")
     if (gc.swb_saw_q is not None and isinstance(config.source, ImasSource)
