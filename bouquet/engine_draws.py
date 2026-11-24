@@ -296,6 +296,8 @@ class EngineDrawContext:
         self.lam = np.asarray(st.lambda_bs, dtype=float).copy()
         self.geom = st.geom
         self.request = np.asarray(st.request, dtype=float).copy()
+        #: the reconstruction's sawtooth reset current (None: the reset is off)
+        self.saw0 = None if st.saw is None else np.asarray(st.saw, dtype=float).copy()
         self.delta = (None if st.delivery_correction is None else
                       np.asarray(st.delivery_correction, dtype=float).copy())
         self.delivery_correction = self.delta is not None
@@ -386,18 +388,23 @@ class EngineDrawContext:
             self.row0 = float(np.interp(float(psi_q[0]), _gp, J))
 
     # ---- composition -----------------------------------------------------
-    def compose(self, geom, jB_ind, jB_bs):
+    def compose(self, geom, jB_ind, jB_bs, j_saw=None):
         """``(J, parts)``: the composition with ``x*`` held -- the SAME
         operations, in the same order, as the reconstruction's closure
-        assembles its current (``s_ind*ind + s_bs*bs + (fix + pressure)``)."""
+        assembles its current (``s_ind*ind + s_bs*bs + (fix + pressure + saw)``);
+        *j_saw* the draw's sawtooth reset current (None: the reconstruction's)."""
         from .engine import compose
         _, p = compose(geom, jB_ind, jB_bs, self.c.jB_fix)
         j_ind = self.s_ind * p["ind"]
         j_bs = self.s_bs * p["bs"]
         j_fix = p["fix"] + p["pressure"]
+        saw = self.saw0 if j_saw is None else j_saw
+        if saw is not None:
+            j_fix = j_fix + saw
         J = j_ind + j_bs + j_fix
-        return J, dict(ind=j_ind, bs=j_bs, fix=j_fix, driven=p["fix"],
-                       pressure=p["pressure"], kappa=p["kappa"])
+        return J, dict(ind=j_ind, bs=j_bs, fix=j_fix,
+                       driven=p["fix"] if saw is None else p["fix"] + saw,
+                       pressure=p["pressure"], kappa=p["kappa"], saw=saw)
 
     def geom_for_pressure(self, pressure):
         """``G*`` with its ``p'`` shifted by the draw's pressure change (the
@@ -697,8 +704,9 @@ class _DrawPasses:
     scalar increments, relax, ONE solve, measure."""
 
     def __init__(self, ctx, backend, inputs, *, geom, pin=None,
-                 delta=None, coil_guard=None, phase="loop", on_solve=None):
+                 delta=None, coil_guard=None, phase="loop", on_solve=None, saw=None):
         self.ctx = ctx
+        self.saw = saw        # engine.SawReset: the draw's own reset current, updated per pass
         self.b = backend
         self.inp = inputs
         self.geom = geom
@@ -720,7 +728,8 @@ class _DrawPasses:
         from .engine import EngineClosureRefused, _lin
         from .utils import closure_sign_convention
         ctx = self.ctx
-        J0, p = ctx.compose(geom, self.inp.jB_ind, jbs)
+        J0, p = ctx.compose(geom, self.inp.jB_ind, jbs,
+                            j_saw=None if self.saw is None else self.saw.j)
         li_ = _lin(geom, p["ind"])
         lb_ = _lin(geom, p["bs"])
         lf_ = _lin(geom, p["fix"])
@@ -813,7 +822,12 @@ class _DrawPasses:
         return meas
 
     def on_pass(self, k, meas, J, entry):
-        if entry.get("omega_next") is None or self.delta is None:
+        if entry.get("omega_next") is None:
+            return
+        if self.saw is not None:
+            self.saw.update(self.last["geom"], self.last["m"])
+            self.passes[-1]["saw"] = dict(self.saw.info)
+        if self.delta is None:
             return
         # the delivery correction (engine_delivery_correction): one Newton
         # step per pass, as the reconstruction takes it
@@ -947,10 +961,14 @@ def run_draw(ctx, backend, inputs, *, label=None, coil_guard=None,
     if ctx.q0_row:
         pin = AxisRowPin(ctx.q0_target, float(ctx.eng.s["q0_tol"]),
                          ctx.row0, label=label)
+    saw = None
+    if ctx.saw0 is not None:
+        from .engine import SawReset
+        saw = SawReset(ctx.eng.s["saw"], ctx.saw0)
     dp = _DrawPasses(ctx, backend, inputs,
                      geom=ctx.geom_for_pressure(inputs.pressure), pin=pin,
                      delta=ctx.delta, coil_guard=coil_guard,
-                     on_solve=lambda n: clock.add("loop", passes=1))
+                     on_solve=lambda n: clock.add("loop", passes=1), saw=saw)
     res = run_jbs_loop(
         jbs0, dp.step, lambda m: scale * np.asarray(m["jdotB_bs"], dtype=float),
         ctx.loop, Ip=float(ctx.c.Ip),
@@ -962,7 +980,7 @@ def run_draw(ctx, backend, inputs, *, label=None, coil_guard=None,
                      "the starting equilibrium, times the draw's bootstrap "
                      "scale (exactly lambda_bs* at zero perturbation)"),
         on_pass=dp.on_pass, q0_pin=pin, raise_on_fail=True,
-        start_refresh=start_refresh)
+        start_refresh=start_refresh, extra=saw)
     if start_refresh is not None:
         res["record"]["bootstrap_refresh"]["source"] = REFRESH_SOURCE
     m_fin = backend.measure(final=True)
@@ -1050,7 +1068,8 @@ def _finish(ctx, backend, inputs, dp, res, m_fin, pin, label):
                  else delivered["q95"] - ctx.ref["q95"]),
             **flux_range_change(delivered["flux_range"],
                                 ctx.ref["flux_range"])),
-        solves=dict(loop=int(backend.n_solves)))
+        solves=dict(loop=int(backend.n_solves)),
+        saw=None if dp.saw is None else dict(dp.saw.info, j=dp.saw.j))
     return dict(record=jsonable(rec), jbs_used=jbs_used, passes=dp,
                 inputs=inputs, pin=pin, measure=m_fin,
                 split=dict(jphi_total=np.asarray(last["jint"], dtype=float),
@@ -1062,7 +1081,8 @@ def _finish(ctx, backend, inputs, dp, res, m_fin, pin, label):
                            jphi_rf=kap * (np.asarray(
                                ctx.c.jB_fix_parts["rf"], dtype=float)
                                + np.asarray(ctx.c.jB_fix_parts.get(
-                                   "other", 0.0), dtype=float))))
+                                   "other", 0.0), dtype=float))
+                           + (0.0 if dp.saw is None else dp.saw.j)))
 
 
 def post_homotopy(ctx, backend, draw, settings, *, coil_guard=None,
@@ -1117,7 +1137,7 @@ def post_homotopy(ctx, backend, draw, settings, *, coil_guard=None,
     jbs0 = (1.0 - omega) * jbs_used + omega * J
     prev = draw["passes"]
     dp = _DrawPasses(ctx, backend, inputs, geom=g, pin=draw.get("pin"),
-                     delta=prev.delta, coil_guard=coil_guard,
+                     delta=prev.delta, coil_guard=coil_guard, saw=prev.saw,
                      phase="post_homotopy",
                      on_solve=(None if clock is None else
                                (lambda n: clock.add("post_homotopy",
@@ -1128,7 +1148,7 @@ def post_homotopy(ctx, backend, draw, settings, *, coil_guard=None,
             li=m["li"], q0=(m["q_row"] if dp.pin is not None else None)),
         gate_li=True, gate_q0=dp.pin is not None, label=label,
         init_source=INIT_POST_HOMOTOPY, on_pass=dp.on_pass, q0_pin=dp.pin,
-        max_passes=n_ph, raise_on_fail=True)
+        max_passes=n_ph, raise_on_fail=True, extra=dp.saw)
     rec["passes"] = res["record"]
     rec["amplitude"] = dp.last["amp"]
     last = dp.last
@@ -1943,6 +1963,8 @@ class GenerateEngineDraws(DrawMethod):
         jdotB_nbi = np.asarray(fx["nbi"], dtype=float)
         jdotB_rf = (np.asarray(fx["rf"], dtype=float)
                  + np.asarray(fx.get("other", 0.0), dtype=float))
+        if dpl.saw is not None:          # the sawtooth reset current, with the other fixed parts
+            jdotB_rf = jdotB_rf + np.asarray(dpl.saw.j, dtype=float) / kap
         cur["final_split"] = dict(
             jphi_bs=(_amp * self.ctx.s_bs * kap * _scale
                   * np.asarray(fin["jdotB_bs"], dtype=float)),
@@ -2048,6 +2070,12 @@ class GenerateEngineDraws(DrawMethod):
                           diagnostics.get(DRAW_BAND_FLAG),
                           parallel=cur.get("parallel"),
                           attrs=diagnostics.get("inspec_draw_attrs"))
+        saw = (cur["draw"].get("passes_post_homotopy") or cur["draw"]["passes"]).saw
+        if saw is not None:              # the swb route's names (swb_draws.store_draw)
+            from .utils import stamp_group_attrs
+            stamp_group_attrs(header, scan_key, count, {
+                "jphi_saw_out": saw.j, "swb_saw_rho_m": saw.info.get("rho_m"),
+                "swb_saw_rho_out": saw.info.get("rho_out"), "swb_saw_n_dips": saw.info.get("n_dips")})
         clock.start("filters")
 
     def until_n(self, ok, reasons, diagnostics, header=None, count=None,

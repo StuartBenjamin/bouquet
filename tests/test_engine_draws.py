@@ -192,6 +192,39 @@ def test_the_zero_perturbation_draw_delivers_the_reconstruction(recon):
     assert v["dq0_psi_N"] == pytest.approx(T.PAD)
 
 
+@pytest.fixture(scope="module")
+def recon_saw():
+    pytest.importorskip("OpenFUSIONToolkit.TokaMaker.bootstrap")   # OFT's 1-D reset (no solver)
+    return _recon(swb_saw_q=1.02, swb_saw_dq=0.05, swb_saw_tol=1e-3)   # the toy: ~0.6x per pass
+
+
+def test_the_sawtooth_reset_lifts_q_to_the_floor_at_fixed_ip(recon):
+    """engine.saw_reset (OFT's 1-D reset) on the toy's q ~ 0.9 core: q of base + reset >= q_s, Ip unchanged."""
+    pytest.importorskip("OpenFUSIONToolkit.TokaMaker.bootstrap")
+    from scipy.integrate import cumulative_trapezoid
+    from bouquet.engine import _saw_settings, complete_geometry, saw_reset
+    b = recon[3]
+    m = b.measure()
+    g = complete_geometry(m["geom"])
+    saw = _saw_settings(GenerationConfig(swb_saw_q=1.02, swb_saw_dq=0.05))
+    dj, info = saw_reset(g, m["q"], m["achieved"], np.zeros(PSI.size), saw)
+    assert min(m["q"]) < 1.0 and info["n_dips"] == 1 and info["rho_m"] > 0.0
+    dI = cumulative_trapezoid(g["w_lin"] * dj, PSI, initial=0.0)
+    I = cumulative_trapezoid(g["w_lin"] * m["achieved"], PSI, initial=0.0) + g["li_geom"]["affine_cum"]
+    assert abs(dI[-1]) <= 1e-3 * b.Ip
+    assert np.min(m["q"][1:] * I[1:] / (I[1:] + dI[1:])) >= 1.02 - 5e-3   # re-integrated dj: discretisation
+
+
+def test_the_reconstruction_and_its_zero_draw_carry_the_reset(recon_saw):
+    """swb_saw_q on the unified engine: the reconstruction converges with the reset current held (q >= q_s),
+    and the zero-perturbation draw still reproduces it bit for bit."""
+    eng, res, rec, b = recon_saw
+    assert np.max(np.abs(res["state"].saw)) > 0.0 and eng.saw.info["n_dips"] == 1
+    assert np.min(b.measure()["q"]) >= 1.02 - 2e-3
+    v = _quiet(ED.verify_zero_perturbation, _ctx(eng, res), b)
+    assert v["passed"] and v["request_bit_identical"]
+
+
 def test_the_clips_floor_the_engine_grid_zeff_the_bootstrap_receives(recon):
     """The engine hands the solve a Z_eff INCREMENT on its own base Z_eff.
     Where the drawn channel's base sits above that base (an IMAS route: the
