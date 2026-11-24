@@ -10,6 +10,7 @@ import test_engine_draws as TED
 from test_engine_draws import toy_bouquet_solver  # noqa: F401  (fixture)
 
 from bouquet import filtering as F
+from bouquet.config import GenerationConfig
 from bouquet import swb_draws as SD
 from bouquet.engine_draws import DRAW_BAND_FLAG
 
@@ -41,6 +42,14 @@ def test_the_metrics_flag_a_reset_step_and_pass_a_rescaled_draw():
     assert z == pytest.approx(0.5) and r == pytest.approx(1.05)
     z, r, _ = F.core_current_metrics(X, _reset_step(J0), J0, SIG)
     assert r > 2.0 and z > 1.5
+
+
+def test_the_gradient_ratio_against_the_input_current():
+    reset = _reset_step(J0)                   # a baseline that carries the reset step too
+    assert F.core_current_metrics(X, reset, reset, SIG)[1] == pytest.approx(1.0)
+    assert F.core_current_metrics(X, reset, reset, SIG, grad_ref=J0)[1] > 2.0   # the step seen against the input
+    with pytest.raises(ValueError, match="core_gradient_reference"):
+        GenerationConfig(core_gradient_reference="draw")
 
 
 def test_the_bands_name_record_and_judge():

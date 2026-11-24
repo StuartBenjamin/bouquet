@@ -305,9 +305,10 @@ class SwbDraws(DrawMethod):
         diagnostics["core_band_reasons"] = list(v["reasons"])
         diagnostics["core_band_attrs"] = dict(
             self.core_bands.flags(v),
-            **{JPHI_BAND_Z_ATTR: float(z), CORE_GRADIENT_RATIO_ATTR: float(ratio)})
+            **{JPHI_BAND_Z_ATTR: float(z), CORE_GRADIENT_RATIO_ATTR: float(ratio)},
+            **({"core_gradient_reference": "input"} if len(self.core_ref) > 3 else {}))
         print(f"  [swb-draw] core current: {z:.2f} sigma_jphi, gradient "
-              f"{ratio:.2f} x baseline -> "
+              f"{ratio:.2f} x {'input' if len(self.core_ref) > 3 else 'baseline'} -> "
               + ("in band" if v["in_band"] else "; ".join(v["reasons"])))
 
     def post_hoc(self, mygs, diagnostics, in_spec, **kwargs):

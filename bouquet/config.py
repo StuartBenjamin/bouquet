@@ -1024,6 +1024,10 @@ class GenerationConfig:
     # the swb draws whose sawtooth reset leaves an unrelaxed current step.
     jphi_band_nsigma: Optional[float] = None
     core_gradient_ratio: Optional[float] = None
+    # The profile core_gradient_ratio compares with (swb only): "baseline" (the
+    # solved baseline's jphi_total, which carries the sawtooth reset too) or
+    # "input" (the input total current, read before the solves).
+    core_gradient_reference: str = "baseline"
     # When True, recompute bootstrap each draw via TokaMaker solve_with_bootstrap
     # (its jphi_bs converted to the field-aligned kappa <j.B> for the installed
     # toolkit's output convention: TokaMaker_interface.swb_result_toroidal),
@@ -2183,6 +2187,8 @@ class GenerationConfig:
             raise ValueError(f"swb_saw_ramp={self.swb_saw_ramp!r} must be >= 0")
         if self.swb_saw_rule not in SWB_SAW_RULES:
             raise ValueError(f"swb_saw_rule={self.swb_saw_rule!r} not in {tuple(SWB_SAW_RULES)}")
+        if self.core_gradient_reference not in ("baseline", "input"):
+            raise ValueError(f"core_gradient_reference={self.core_gradient_reference!r} not in ('baseline', 'input')")
         if not float(self.swb_saw_flatten_width) >= 0.0:
             raise ValueError(f"swb_saw_flatten_width={self.swb_saw_flatten_width!r} must be >= 0")
         if self.swb_saw_flatten not in (None, "value", "volume", "stiff"):

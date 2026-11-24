@@ -469,6 +469,7 @@ class SwbBaseline:
         if not np.array_equal(coords.swb_grid(psi_N), psi_N):
             raise RuntimeError('imas_baseline="swb" needs SWB on the run grid')
         jphi_total_src = np.asarray(bl.jphi_total, dtype=float).copy()
+        bl.jphi_total_input = jphi_total_src
         self._swb_source_split(psi_N)
         kin = self._swb_baseline_kinetics()
 
@@ -749,4 +750,5 @@ def build_swb_context(bq, env, replay=None):
         core_bands=resolve_inspec_bands(gc),
         core_ref=(np.asarray(bl.psi_N, dtype=float),
                   np.asarray(bl.jphi_total, dtype=float),
-                  np.asarray(env["sigma_jphi"], dtype=float)))
+                  np.asarray(env["sigma_jphi"], dtype=float))
+        + ((np.asarray(bl.jphi_total_input, dtype=float),) if getattr(gc, "core_gradient_reference", "baseline") == "input" else ()))

@@ -528,11 +528,12 @@ def edge_current_minimum(psi_N, jphi, rel=0.02):
     return float(x[im]) if im < ip and j[ip] - j[im] > rel * np.max(np.abs(j)) else None
 
 
-def core_current_metrics(x, jphi, jphi_ref, sigma_ref):
+def core_current_metrics(x, jphi, jphi_ref, sigma_ref, grad_ref=None):
     """``(z, gradient_ratio, x_ped)`` of a draw's *jphi* inside the pedestal
     top (:func:`pedestal_top` of the baseline *jphi_ref*): the largest
     ``|jphi - jphi_ref| / sigma_ref`` there, and the largest ``|d jphi /
-    d sqrt(x)|`` there over the baseline's.  NaN when not computable."""
+    d sqrt(x)|`` there over that of *grad_ref* (default *jphi_ref*).  NaN
+    when not computable."""
     x = np.asarray(x, dtype=float)
     j, jr = np.asarray(jphi, dtype=float), np.asarray(jphi_ref, dtype=float)
     sg = np.asarray(sigma_ref, dtype=float)
@@ -541,7 +542,7 @@ def core_current_metrics(x, jphi, jphi_ref, sigma_ref):
     ok = core & (sg > 0)
     z = float(np.max(np.abs(j - jr)[ok] / sg[ok])) if ok.any() else float("nan")
     rho = np.sqrt(np.clip(x, 0.0, None))
-    g_ref = np.max(np.abs(np.gradient(jr, rho)[core]))
+    g_ref = np.max(np.abs(np.gradient(jr if grad_ref is None else np.asarray(grad_ref, dtype=float), rho)[core]))
     ratio = (float(np.max(np.abs(np.gradient(j, rho)[core])) / g_ref)
              if g_ref > 0 else float("nan"))
     return z, ratio, xp
