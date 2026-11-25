@@ -620,22 +620,25 @@ def test_flatten_rules_keep_the_edge_value_or_the_content():
     assert np.abs(np.diff(wid["ne"])).max() < 0.2 * np.abs(np.diff(vol["ne"])).max()   # no step left
 
 
-def test_flatten_value_smoothed_and_stiff_keep_the_whole_content():
+def test_flatten_gradient_blend_and_stiff_keep_the_whole_content():
     x = np.linspace(0.0, 1.0, 2001)
     V = x ** 1.5
     kin, x_m = _kin(x), 0.3
+    r, r_m = np.sqrt(x), np.sqrt(0.3)
     sharp = swb_mod.swb_saw_flatten(kin, x, V, x_m, "value")
-    val = swb_mod.swb_saw_flatten(kin, x, V, x_m, "value", width=0.1)   # blend over rho_m .. rho_m + 0.1
-    out = x >= (np.sqrt(x_m) + 0.1) ** 2
+    val = swb_mod.swb_saw_flatten(kin, x, V, x_m, "value", width=0.2, drop=0.03)   # leaves the core within 0.03
+    out, blend = r >= r_m + 0.2, (r[1:] > r_m) & (r[1:] < r_m + 0.2)              # rejoins at rho_m + 0.2
     kink = lambda a: np.abs(np.diff(a, 2)).max()                     # noqa: E731
+    slope = lambda a: np.abs(np.diff(a) / np.diff(r))[blend].max()   # noqa: E731
     for k, v in kin.items():
         assert np.allclose(val[k][x < x_m], np.interp(x_m, x, v)) and np.array_equal(val[k][out], v[out])
         assert kink(val[k]) < 0.2 * kink(sharp[k])
-    st = swb_mod.swb_saw_flatten(kin, x, V, x_m, "stiff", width=0.1)
+    assert slope(val["ne"]) < 1.25 * slope(kin["ne"])               # steepest gradient near the profile's own
+    st = swb_mod.swb_saw_flatten(kin, x, V, x_m, "stiff", width=0.2, drop=0.03)
     for a, b in (("ne", None), ("p_fixed", None), ("ne", "te"), ("ni", "ti"), ("ne", "Zeff")):
         f = lambda d: d[a] * (d[b] if b else 1.0)                    # noqa: E731
         assert np.trapezoid(f(st), V) == pytest.approx(np.trapezoid(f(kin), V), rel=1e-12)   # whole plasma kept
-    assert np.ptp(st["ne"][x < x_m]) == 0.0 and st["ne"][-1] == kin["ne"][-1]
+    assert np.ptp(st["ne"][x < x_m]) < 1e-12 and st["ne"][-1] == kin["ne"][-1]
 
 
 def test_flatten_repeats_until_the_core_edge_settles(monkeypatch):
@@ -661,3 +664,5 @@ def test_flatten_needs_the_reset():
     assert any("swb_saw_flatten needs" in m for m in swb_config_problems(_cfg(swb_saw_flatten="value")))
     with pytest.raises(ValueError, match="swb_saw_flatten"):
         GenerationConfig(swb_saw_flatten="mean")
+    with pytest.raises(ValueError, match="swb_saw_flatten_drop"):
+        GenerationConfig(swb_saw_flatten_width=0.1, swb_saw_flatten_drop=0.1)

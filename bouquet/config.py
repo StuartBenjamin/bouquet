@@ -1687,12 +1687,15 @@ class GenerationConfig:
     # impurity) made flat inside it, and the solve repeated until it settles.  "value": each at its value at rho_m;
     # "volume": volume averages (densities, n T and p_fixed; Z_eff weighted
     # by n_e), so particles and stored energy inside rho_m are kept; "stiff":
-    # the profiles outside scaled up with a smooth falloff to the LCFS, so the
+    # the "value" profiles scaled up with a smooth falloff to the LCFS, so the
     # whole-plasma particles and stored energy are kept.  None: off.
     swb_saw_flatten: Optional[str] = None
-    # Width in rho = sqrt(x) of the smooth blend just outside the core edge
-    # (swb.swb_saw_flatten); 0: a step ("volume") or a kink there.
+    # Widths in rho = sqrt(x) (swb.swb_saw_flatten): the gradient leaves the
+    # flat core within swb_saw_flatten_drop and rejoins the profile's at
+    # rho_m + swb_saw_flatten_width, with continuous slope at both joins
+    # (drop 0: a kink at rho_m); width 0: a step ("volume") or a kink there.
     swb_saw_flatten_width: float = 0.0
+    swb_saw_flatten_drop: float = 0.0
     # swb only.  OFT interpolation of the inductive jphi profile between its
     # nodes (OFT profile key 'interp'; P' inherits it): "cubic" (C2 spline;
     # an OFT with c2_profile_interp, the internal solve) or "linterp"; None
@@ -2191,6 +2194,9 @@ class GenerationConfig:
             raise ValueError(f"core_gradient_reference={self.core_gradient_reference!r} not in ('baseline', 'input')")
         if not float(self.swb_saw_flatten_width) >= 0.0:
             raise ValueError(f"swb_saw_flatten_width={self.swb_saw_flatten_width!r} must be >= 0")
+        if not (self.swb_saw_flatten_drop == 0.0 or 0.0 < self.swb_saw_flatten_drop < self.swb_saw_flatten_width):
+            raise ValueError(f"swb_saw_flatten_drop={self.swb_saw_flatten_drop!r} must be 0 or in "
+                             "(0, swb_saw_flatten_width)")
         if self.swb_saw_flatten not in (None, "value", "volume", "stiff"):
             raise ValueError(f"swb_saw_flatten={self.swb_saw_flatten!r} not in (None, 'value', 'volume', 'stiff')")
         if self.swb_jind_interp not in (None, "linterp", "cubic"):
