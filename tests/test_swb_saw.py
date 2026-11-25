@@ -41,7 +41,9 @@ class TestConfig:
     @pytest.mark.parametrize("kw", [dict(swb_saw_q=0.0), dict(swb_saw_q=-1.0),
                                     dict(swb_saw_rule=1), dict(swb_saw_rule="outer"),
                                     dict(swb_saw_dq=0.0), dict(swb_saw_dq=-0.03),
-                                    dict(swb_saw_tol=0.0), dict(swb_saw_ramp=-0.01)])
+                                    dict(swb_saw_tol=0.0), dict(swb_saw_ramp=-0.01),
+                                    dict(swb_saw_drop=0.3, swb_saw_width=0.3),
+                                    dict(swb_saw_drop=0.04, swb_saw_width=0.3, swb_saw_rule="fuse")])
     def test_bad_values_refused(self, kw):
         with pytest.raises(ValueError, match=next(iter(kw))):
             GenerationConfig(imas_baseline="swb", **kw)
@@ -329,9 +331,18 @@ def test_saw_names_are_real_toolkit_arguments():
     """Against an installed saw toolkit: the reserved names exist (no typo)."""
     from bouquet.config import _bootstrap_kwarg_names
     known = _bootstrap_kwarg_names()
-    if known is None or "jphi_saw" not in known:
-        pytest.skip("needs an OpenFUSIONToolkit with jphi_saw")
+    if known is None or "saw_width" not in known:
+        pytest.skip("needs an OpenFUSIONToolkit with saw_width")
     assert GenerationConfig._SAW_RESERVED <= known and "saw_relax" in known
+
+
+def test_saw_blend_widths_go_to_the_toolkit_only_when_set():
+    bl = types.SimpleNamespace(jphi_saw_input=np.ones(3))
+    kw = lambda **g: Bouquet._swb_saw_kwargs(types.SimpleNamespace(            # noqa: E731
+        config=types.SimpleNamespace(generation=GenerationConfig(swb_saw_q=1.02, **g)), baseline=bl))
+    assert not {"saw_drop", "saw_width"} & set(kw())                         # an older toolkit still works
+    on = kw(swb_saw_drop=0.04, swb_saw_width=0.3)
+    assert (on["saw_drop"], on["saw_width"], on["saw_rule"]) == (0.04, 0.3, 2)
 
 
 # ---- review fixes: phi_n, taper identity, sigma=0 mismatch, jphi_saw map check ----

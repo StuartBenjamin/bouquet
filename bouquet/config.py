@@ -1681,6 +1681,12 @@ class GenerationConfig:
     swb_saw_tol: float = 1.0e-4
     swb_saw_ramp: float = 0.01
     swb_saw_rule: str = "local"
+    # OFT saw_drop / saw_width (rho = sqrt(Phi_N); "local" rule): the reset
+    # current leaves its flat band within swb_saw_drop and rejoins the base
+    # current within swb_saw_width, gradients continuous; 0: OFT's reset as
+    # before (passed only when swb_saw_width > 0).
+    swb_saw_drop: float = 0.0
+    swb_saw_width: float = 0.0
     # swb_saw_q only.  Pressure flattening inside the core edge, the outermost
     # crossing of q = swb_saw_q + swb_saw_dq (the reset's rho_m where it fires;
     # swb.swb_saw_flatten): n_e, T_e, n_i, T_i, Z_eff and p_fixed (fast +
@@ -2104,7 +2110,7 @@ class GenerationConfig:
 
     #: Set from the ``swb_saw_*`` fields, never from ``bootstrap_kwargs``.
     _SAW_RESERVED = frozenset(
-        "jphi_saw saw_q_s saw_dq saw_tol saw_ramp saw_rule".split())
+        "jphi_saw saw_q_s saw_dq saw_tol saw_ramp saw_rule saw_drop saw_width".split())
 
     def _validate_bootstrap_kwargs(self, value):
         """:func:`validate_bootstrap_kwargs` with this config's reserved
@@ -2188,6 +2194,10 @@ class GenerationConfig:
             raise ValueError(f"swb_saw_ramp={self.swb_saw_ramp!r} must be >= 0")
         if self.swb_saw_rule not in SWB_SAW_RULES:
             raise ValueError(f"swb_saw_rule={self.swb_saw_rule!r} not in {tuple(SWB_SAW_RULES)}")
+        if not ((self.swb_saw_drop, self.swb_saw_width) == (0.0, 0.0)
+                or (0.0 < self.swb_saw_drop < self.swb_saw_width and self.swb_saw_rule == "local")):
+            raise ValueError(f"swb_saw_drop={self.swb_saw_drop!r}, swb_saw_width={self.swb_saw_width!r}: both 0, "
+                             "or 0 < drop < width with swb_saw_rule 'local'")
         if self.core_gradient_reference not in ("baseline", "input"):
             raise ValueError(f"core_gradient_reference={self.core_gradient_reference!r} not in ('baseline', 'input')")
         if not float(self.swb_saw_flatten_width) >= 0.0:
