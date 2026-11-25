@@ -155,8 +155,8 @@ DRAW_REJECTION_REASONS = {
                                 "than the cap (the capped one is "
                                 "homotopy_maxits); legacy draws: any "
                                 "failure, capped or not",
-    # engine draws (bouquet.engine_draws) only
-    "kinetics_nonphysical": "an engine draw's DRAWN kinetics are outside "
+    # engine and swb draws
+    "kinetics_nonphysical": "a draw's DRAWN kinetics are outside "
                             "the physical domain of the bootstrap model "
                             "(n_e, n_i, T_e or T_i not strictly positive, "
                             "Z_eff < 1, or a non-finite value, at any "

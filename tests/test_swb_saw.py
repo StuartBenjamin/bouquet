@@ -582,6 +582,24 @@ def test_a_negative_seed_redraw_refuses_the_draw():
         SD.SwbDraws(recipe, np.r_[0.0, seed[1:]], 1e-3 * np.abs(seed))
 
 
+def test_drawn_kinetics_through_zero_are_refused_before_the_solve(monkeypatch):
+    """A drawn T_e <= 0 at the axis (an input core sigma larger than T_e) is refused as
+    kinetics_nonphysical before the solve, as engine draws are, not left to the toolkit (`pax` > 0)."""
+    x = np.linspace(0.0, 1.0, 17)
+    prof = 1.0 - x ** 2 + 0.1
+    te = np.r_[-0.2, prof[1:]]
+    monkeypatch.setattr(SD, "draw_kinetics", lambda *a, **k: dict(
+        ne=prof, te=te, ni=prof, ti=prof, ne_eq=prof, te_eq=te, ni_eq=prof, ti_eq=prof, Zeff=1.5 + 0 * x, aux={}))
+    calls = []
+    with pytest.raises(SD.DrawKineticsNonPhysical, match="te") as ei:
+        SD.swb_draw(None, x, None, prof, prof, prof, prof, prof, prof, prof, prof, None, 0.5, 0.4, 0.25,
+                    1.5 + 0 * x, prof, lambda kin, j: calls.append(kin), coord="psi_n", rng=0, p_thresh=0.05)
+    assert not calls                                   # never solved
+    m = SD.SwbDraws(None, 1.0 + x, 0 * x)
+    assert m.rejection_reason(ei.value, "perturb") == "kinetics_nonphysical"
+    assert m.annotate_rejection({}, ei.value)["info"]["quantity"] == "te"
+
+
 def test_the_swb_split_is_archived_as_the_third_bucket(tmp_path):
     h5py = pytest.importorskip("h5py")
     from bouquet.schema import (CURRENT_SPLIT_CONVENTION_ATTR,

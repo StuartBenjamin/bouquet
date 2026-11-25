@@ -14,6 +14,7 @@ import json
 import numpy as np
 
 from .draw_methods import DrawMethod
+from .engine_draws import DrawKineticsNonPhysical, check_draw_kinetics
 from .kinetic_sampler import KineticBase, KineticDraw, kinetic_noise
 from .physics import ELEMENTARY_CHARGE
 from .sampling import ReplayExhausted, ReplayNoise, generate_perturbed_GPR, make_rng
@@ -155,6 +156,8 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
                    None if p_fast is None else _kin_to_eq(np.asarray(p_fast, dtype=float)),
                    None if z_fast is None else _kin_to_eq(np.asarray(z_fast, dtype=float)),
                    Z_imp))
+    if not _kin_sigma0:     # drawn kinetics through zero are refused before the solve, as engine draws are
+        check_draw_kinetics(dict(kin, zeff=Zeff), psi_N, "swb draw")
     res = swb_recipe(kin, j_seed)
     flat = res.get("saw_flat") or {}
     if flat.get("kin") is not None:   # swb_saw_flatten: the kinetics the solve used, kinetic grid too
@@ -340,7 +343,14 @@ class SwbDraws(DrawMethod):
     def rejection_reason(self, exc, stage):
         if isinstance(exc, SwbSeedRedrawRefused):
             return SWB_JIND_REJECTION
+        if isinstance(exc, DrawKineticsNonPhysical):
+            return "kinetics_nonphysical"
         return super().rejection_reason(exc, stage)
+
+    def annotate_rejection(self, record, exc):
+        if isinstance(exc, DrawKineticsNonPhysical):
+            record["info"] = dict(exc.info)
+        return record
 
     def store_draw(self, header, count, scan_key, diagnostics):
         from .utils import stamp_group_attrs
