@@ -597,48 +597,41 @@ def _kin(x):
     return dict(ne=ne, te=2.0 - x, ni=0.9 * ne, ti=1.5 - x, Zeff=1.5 + 0.2 * x, p_fixed=1.0 - x)
 
 
-def test_flatten_rules_keep_the_edge_value_or_the_content():
+def test_flatten_keeps_the_contents():
     x = np.linspace(0.0, 1.0, 2001)
     V = x ** 1.5                                   # any enclosed volume, 0 on the axis
     kin, x_m = _kin(x), 0.3
     inside = x < x_m
-    val = swb_mod.swb_saw_flatten(kin, x, V, x_m, "value")
-    vol = swb_mod.swb_saw_flatten(kin, x, V, x_m, "volume")
+    vol = swb_mod.swb_saw_flatten(kin, x, V, x_m)
     for k, v in kin.items():
-        assert np.allclose(val[k][inside], np.interp(x_m, x, v))
-        assert np.array_equal(val[k][~inside], v[~inside]) and np.array_equal(vol[k][~inside], v[~inside])
-        assert np.ptp(vol[k][inside]) == 0.0
+        assert np.array_equal(vol[k][~inside], v[~inside]) and np.ptp(vol[k][inside]) == 0.0
     S = lambda a: np.trapezoid(np.where(inside, a, 0.0), V)          # noqa: E731
     for a, b in (("ne", None), ("ni", None), ("p_fixed", None), ("ne", "te"), ("ni", "ti"), ("ne", "Zeff")):
         f = lambda d: d[a] * (d[b] if b else 1.0)                    # noqa: E731
         assert S(f(vol)) == pytest.approx(S(f(kin)), rel=2e-3)       # particles, energy, sum n Z^2 kept
-    wid = swb_mod.swb_saw_flatten(kin, x, V, x_m, "volume", width=0.1)    # blend over rho_m .. rho_m + 0.1
+    wid = swb_mod.swb_saw_flatten(kin, x, V, x_m, width=0.1)         # rejoins at rho_m + 0.1
     out, S2 = x >= (np.sqrt(x_m) + 0.1) ** 2, lambda a: np.trapezoid(np.where(x < (np.sqrt(x_m) + 0.1) ** 2, a, 0.0), V)
     for k, v in kin.items():
-        assert np.ptp(wid[k][inside]) == 0.0 and np.array_equal(wid[k][out], v[out])
+        assert np.ptp(wid[k][inside]) < 1e-12 and np.array_equal(wid[k][out], v[out])
     assert S2(wid["ne"] * wid["te"]) == pytest.approx(S2(kin["ne"] * kin["te"]), rel=2e-3)
     assert np.abs(np.diff(wid["ne"])).max() < 0.2 * np.abs(np.diff(vol["ne"])).max()   # no step left
 
 
-def test_flatten_gradient_blend_and_stiff_keep_the_whole_content():
+def test_flatten_gradient_leaves_the_core_and_rejoins_smoothly():
     x = np.linspace(0.0, 1.0, 2001)
     V = x ** 1.5
-    kin, x_m = _kin(x), 0.3
-    r, r_m = np.sqrt(x), np.sqrt(0.3)
-    sharp = swb_mod.swb_saw_flatten(kin, x, V, x_m, "value")
-    val = swb_mod.swb_saw_flatten(kin, x, V, x_m, "value", width=0.2, drop=0.03)   # leaves the core within 0.03
-    out, blend = r >= r_m + 0.2, (r[1:] > r_m) & (r[1:] < r_m + 0.2)              # rejoins at rho_m + 0.2
-    kink = lambda a: np.abs(np.diff(a, 2)).max()                     # noqa: E731
-    slope = lambda a: np.abs(np.diff(a) / np.diff(r))[blend].max()   # noqa: E731
+    kin, x_m = _kin(x), 0.09
+    r, r_m = np.sqrt(x), 0.3
+    sm = swb_mod.swb_saw_flatten(kin, x, V, x_m, width=0.5, drop=0.04)   # drop-off 0.04, rejoin at rho_m + 0.5
+    kinked = swb_mod.swb_saw_flatten(kin, x, V, x_m, width=0.5)           # drop 0: the gradient jumps at rho_m
+    out = r >= r_m + 0.5
     for k, v in kin.items():
-        assert np.allclose(val[k][x < x_m], np.interp(x_m, x, v)) and np.array_equal(val[k][out], v[out])
-        assert kink(val[k]) < 0.2 * kink(sharp[k])
-    assert slope(val["ne"]) < 1.25 * slope(kin["ne"])               # steepest gradient near the profile's own
-    st = swb_mod.swb_saw_flatten(kin, x, V, x_m, "stiff", width=0.2, drop=0.03)
+        assert np.ptp(sm[k][x < x_m]) < 1e-12 and np.array_equal(sm[k][out], v[out])
     for a, b in (("ne", None), ("p_fixed", None), ("ne", "te"), ("ni", "ti"), ("ne", "Zeff")):
         f = lambda d: d[a] * (d[b] if b else 1.0)                    # noqa: E731
-        assert np.trapezoid(f(st), V) == pytest.approx(np.trapezoid(f(kin), V), rel=1e-12)   # whole plasma kept
-    assert np.ptp(st["ne"][x < x_m]) < 1e-12 and st["ne"][-1] == kin["ne"][-1]
+        assert np.trapezoid(f(sm), V) == pytest.approx(np.trapezoid(f(kin), V), rel=1e-12)   # whole plasma kept
+    bend = lambda a: np.abs(np.diff(np.diff(a) / np.diff(r), 2)).max()   # noqa: E731
+    assert bend(sm["ne"]) < 0.05 * bend(kinked["ne"])
 
 
 def test_flatten_repeats_until_the_core_edge_settles(monkeypatch):
@@ -651,17 +644,17 @@ def test_flatten_repeats_until_the_core_edge_settles(monkeypatch):
 
     monkeypatch.setattr(swb_mod, "_swb_q_volume", lambda mygs, x, coord: (1.0 + 0.07 * x / next(edges), x))
     stub = types.SimpleNamespace(config=types.SimpleNamespace(generation=GenerationConfig(
-        swb_saw_q=1.02, swb_saw_dq=0.05, swb_saw_flatten="value")), baseline=types.SimpleNamespace(psi_N=x, coord="phi_n"),
+        swb_saw_q=1.02, swb_saw_dq=0.05, swb_saw_flatten="volume")), baseline=types.SimpleNamespace(psi_N=x, coord="phi_n"),
         mygs=None, _swb_solve_once=once)
     res = Bouquet._swb_solve(stub, _kin(x), np.ones_like(x))
     assert len(seen) == 3 and seen[0]["ne"][0] == _kin(x)["ne"][0]   # first solve unflattened
     assert res["saw_flat"]["rho_m"] == pytest.approx(0.32) and res["saw_flat"]["repeats"] == 2
-    assert np.allclose(seen[2]["ne"][x < 0.32 ** 2], np.interp(0.32 ** 2, x, _kin(x)["ne"]))
+    assert np.ptp(seen[2]["ne"][x < 0.32 ** 2]) == 0.0 and seen[1]["ne"][x < 0.3 ** 2][0] != seen[2]["ne"][0]
     assert swb_mod.core_edge(x, 1.2 + x, 1.07) is None               # no core: not flattened
 
 
 def test_flatten_needs_the_reset():
-    assert any("swb_saw_flatten needs" in m for m in swb_config_problems(_cfg(swb_saw_flatten="value")))
+    assert any("swb_saw_flatten needs" in m for m in swb_config_problems(_cfg(swb_saw_flatten="volume")))
     with pytest.raises(ValueError, match="swb_saw_flatten"):
         GenerationConfig(swb_saw_flatten="mean")
     with pytest.raises(ValueError, match="swb_saw_flatten_drop"):

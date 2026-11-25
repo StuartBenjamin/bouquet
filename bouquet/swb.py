@@ -36,7 +36,7 @@ SWB_SAW_MAP_TOL = 1e-3
 #: swb_saw_flatten: the solve is repeated until the core edge's rho moves by at most this, at most SWB_FLAT_MAXIT times.
 SWB_FLAT_TOL = 1e-3
 SWB_FLAT_MAXIT = 6
-#: swb_saw_flatten "volume" / "stiff": profiles kept as contents with a density weight (T_e: n_e T_e, T_i: n_i T_i,
+#: swb_saw_flatten: profiles kept as contents with a density weight (T_e: n_e T_e, T_i: n_i T_i,
 #: Z_eff: n_e Z_eff).
 _FLAT_WEIGHT = {"te": "ne", "ti": "ni", "Zeff": "ne"}
 
@@ -58,22 +58,18 @@ def _gradient_blend(c, r, r_m, drop, width):
     return c + tail((1.0 - s_in) * np.diff(c)), tail(s_in * (1.0 - _smooth_step((rh - r_m) / width)) * np.diff(r))
 
 
-def swb_saw_flatten(kin, x, V, x_m, rule, width=0.0, drop=0.0):
+def swb_saw_flatten(kin, x, V, x_m, width=0.0, drop=0.0):
     """``kin`` (``ne te ni ti Zeff p_fixed`` on the grid ``x``) made flat inside
     ``x_m`` (``GenerationConfig.swb_saw_flatten``), ``V`` the enclosed volume
-    on ``x`` (any constant factor, 0 on the axis).  ``"value"``: each at its
-    value at ``x_m``.  ``"volume"``: at volume averages of the densities and
-    p_fixed as they are and of T_e, T_i, Z_eff weighted by n_e, n_i, n_e, so
-    the particles, the stored energy and sum n Z^2 inside the flattened range
-    are kept.  ``"stiff"``: the "value" profiles scaled by 1 + a h (h = 1
-    inside rho_m, a C2 step down to 0 at the LCFS: gradient lengths kept where
-    h is flat), a such that the whole-plasma contents are kept.  ``width``
-    (``swb_saw_flatten_width``, in rho = sqrt(x)) > 0: the gradient leaves the
-    flat core within ``drop`` (``swb_saw_flatten_drop``) and rejoins the
-    profile's at rho_m + width (:func:`_gradient_blend`), its extra drop ("value":
-    the profile's own over rho_m .. rho_m + width; "volume": the contents of
-    rho <= rho_m + width kept) spread over that range.  Any subset of the keys
-    (a weighted one with its weight)."""
+    on ``x`` (any constant factor, 0 on the axis), keeping the densities and
+    p_fixed as they are and T_e, T_i, Z_eff through n_e T_e, n_i T_i, n_e
+    Z_eff (particles, stored energy, sum n Z^2): ``width`` 0, inside ``x_m``
+    (their volume averages there, a step at ``x_m``); ``width``
+    (``swb_saw_flatten_width``, in rho = sqrt(x)) > 0, over rho <= rho_m +
+    width, the gradient leaving the flat core within ``drop``
+    (``swb_saw_flatten_drop``) and rejoining the profile's at rho_m + width
+    (:func:`_gradient_blend`).  Any subset of the keys (a weighted one with its
+    weight)."""
     x = np.asarray(x, dtype=float)
     kin = {k: np.asarray(v, dtype=float) for k, v in kin.items()}
     V = np.asarray(V, dtype=float)
@@ -83,21 +79,12 @@ def swb_saw_flatten(kin, x, V, x_m, rule, width=0.0, drop=0.0):
     def keep(c):
         if width > 0.0:
             P, Q = _gradient_blend(c, r, r_m, drop, width)
-            A = ((np.trapezoid(P, V) - np.trapezoid(c, V)) / np.trapezoid(Q, V) if rule == "volume"
-                 else (P[0] - float(np.interp(x_m, x, c))) / Q[0])
-            v = P - A * Q
-        elif rule == "volume":
-            xs = np.r_[x[inside], x_m]
-            v = np.where(inside, np.trapezoid(np.interp(xs, x, c), np.interp(xs, x, V)) / np.interp(x_m, x, V), c)
-        else:
-            v = np.where(inside, float(np.interp(x_m, x, c)), c)
-        if rule != "stiff":
-            return v
-        h = 1.0 - _smooth_step((r - r_m) / (1.0 - r_m))
-        return v * (1.0 + (np.trapezoid(c, V) - np.trapezoid(v, V)) / np.trapezoid(v * h, V) * h)
+            return P - (np.trapezoid(P, V) - np.trapezoid(c, V)) / np.trapezoid(Q, V) * Q
+        xs = np.r_[x[inside], x_m]
+        return np.where(inside, np.trapezoid(np.interp(xs, x, c), np.interp(xs, x, V)) / np.interp(x_m, x, V), c)
     out = {k: keep(kin[_FLAT_WEIGHT[k]] * v) / keep(kin[_FLAT_WEIGHT[k]]) if k in _FLAT_WEIGHT else keep(v)
            for k, v in kin.items()}
-    return out if rule == "stiff" else {k: np.where(r < r_m + width, out[k], v) for k, v in kin.items()}
+    return {k: np.where(r < r_m + width, out[k], v) for k, v in kin.items()}
 
 
 def core_edge(x, q, q_core):
@@ -285,7 +272,7 @@ class SwbBaseline:
                 warnings.warn(f"swb_saw_flatten: core edge rho {rho_used:.4f} -> {rho:.4f} after "
                               f"{n} repeats (tol {SWB_FLAT_TOL:g})", RuntimeWarning, stacklevel=2)
                 break
-            flat, x_m = swb_saw_flatten(kin, x, V, x_1, rule, gc.swb_saw_flatten_width, gc.swb_saw_flatten_drop), x_1
+            flat, x_m = swb_saw_flatten(kin, x, V, x_1, gc.swb_saw_flatten_width, gc.swb_saw_flatten_drop), x_1
             rho_used = rho
             res = self._swb_solve_once(flat, j_seed, coil_reg_target, warm_eq)
         res["saw_flat"] = dict(rule=rule, width=gc.swb_saw_flatten_width, drop=gc.swb_saw_flatten_drop, rho_m=rho_used,
