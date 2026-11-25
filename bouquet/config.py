@@ -2094,6 +2094,15 @@ class GenerationConfig:
     # growing outward until it joins the packed grid; the zone's surfaces count in ifile_npsi.
     # Stamped ifile_axis_pack.  Needs an OFT with save_ifile(axis_pack=).
     ifile_axis_pack: float = 0.0
+    # OFT save_ifile's theta sampling (OFT #472): None (not passed: OFT's default, unstamped; 'auto'
+    # on PSFC_dev from 4bcb92c) or 'auto' (packed toward the X-point when diverted, by xpoint_amp /
+    # xpoint_width; uniform when limited).  The packing thins the points away from the X-point
+    # 1.28x: raise ifile_ntheta with it (513 -> 657).  Stamped ifile_theta_sampling (the sampling
+    # written, 'xpoint' or 'uniform'), ifile_xpoint_amp, ifile_xpoint_width.  Needs an OFT with
+    # save_ifile(theta_sampling=).
+    ifile_theta_sampling: Optional[str] = None
+    ifile_xpoint_amp: float = 7.0
+    ifile_xpoint_width: float = 0.10
     # Also archive the TokaMaker equilibrium each i-file is written from (save_TokaMaker; ~0.9 MB
     # per group on the D3D mesh), so any i-file can be rebuilt later (DrawView.rebuild_ifile) and
     # the archived i-files can be dropped once used (filtering.drop_file_blobs).  Only with

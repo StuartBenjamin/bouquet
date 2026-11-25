@@ -492,7 +492,8 @@ def try_save_ifile(mygs, filename, record=None, **kwargs):
 
 def save_state_ifile(mygs, filename, *, npsi, ntheta, psi_pad, p_sep,
                      orientation=None, profile_derivs=False, psi_bounds=False,
-                     axis_pack=0.0, state_path=None):
+                     axis_pack=0.0, theta_sampling=None, xpoint_amp=7.0, xpoint_width=0.10,
+                     state_path=None):
     r'''The OFT i-file of ``mygs``'s current state, carrying the SAME
     pressure frame as the g-file bouquet writes of that state: the
     separatrix pressure ``p_sep`` is passed as ``lcfs_pressure`` exactly as
@@ -501,8 +502,10 @@ def save_state_ifile(mygs, filename, *, npsi, ntheta, psi_pad, p_sep,
     record)``; the record (``ifile_written``, ``ifile_error``, the grid,
     the ``lcfs_pressure`` handed over, the extended records written, the
     frame and the source orientation signs) is stamped on the archive group
-    by the caller.  ``profile_derivs`` / ``psi_bounds`` / ``axis_pack`` are
-    handed to ``save_ifile`` only when set (an older OFT has none of them).  With
+    by the caller.  ``profile_derivs`` / ``psi_bounds`` / ``axis_pack`` / ``theta_sampling``
+    (with ``xpoint_amp`` / ``xpoint_width``) are handed to ``save_ifile`` only when set (an
+    older OFT has none of them); ``ifile_theta_sampling`` stamps the sampling written ('xpoint'
+    when 'auto' meets a diverted state, else 'uniform').  With
     ``state_path`` the same state's TokaMaker equilibrium is saved there too
     (``save_TokaMaker``); a failed state save fails the i-file the same way.'''
     from .edge_pressure import lcfs_kwargs
@@ -515,6 +518,12 @@ def save_state_ifile(mygs, filename, *, npsi, ntheta, psi_pad, p_sep,
                                     psi_bounds=psi_bounds).items() if v}
     if axis_pack:
         ext["axis_pack"] = float(axis_pack)
+    if theta_sampling:
+        ext.update(theta_sampling=theta_sampling, xpoint_amp=float(xpoint_amp),
+                   xpoint_width=float(xpoint_width))
+        packed = theta_sampling == "xpoint" or (theta_sampling == "auto" and bool(mygs.diverted))
+        rec.update(ifile_theta_sampling="xpoint" if packed else "uniform",
+                   ifile_xpoint_amp=float(xpoint_amp), ifile_xpoint_width=float(xpoint_width))
     for k, v in (orientation or {}).items():
         if v is not None:
             rec[f"ifile_{k}"] = float(v)

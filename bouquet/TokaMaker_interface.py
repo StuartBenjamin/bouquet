@@ -5761,6 +5761,9 @@ def generate_bouquet(
     ifile_profile_derivs=False,
     ifile_psi_bounds=False,
     ifile_axis_pack=0.0,
+    ifile_theta_sampling=None,
+    ifile_xpoint_amp=7.0,
+    ifile_xpoint_width=0.10,
     store_tokamaker_state=False,
     store_eqdsk=True,
     eqdsk_nr=257,
@@ -6095,7 +6098,9 @@ def generate_bouquet(
     _ifile_kw = dict(npsi=int(ifile_npsi), ntheta=int(ifile_ntheta),
                      psi_pad=psi_pad, orientation=ifile_orientation,
                      profile_derivs=bool(ifile_profile_derivs),
-                     psi_bounds=bool(ifile_psi_bounds), axis_pack=float(ifile_axis_pack))
+                     psi_bounds=bool(ifile_psi_bounds), axis_pack=float(ifile_axis_pack),
+                     theta_sampling=ifile_theta_sampling, xpoint_amp=float(ifile_xpoint_amp),
+                     xpoint_width=float(ifile_xpoint_width))
 
     def _state_of(ifile_path):
         # where save_state_ifile also saves the TokaMaker state (None: not stored)

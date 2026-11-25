@@ -149,6 +149,21 @@ def test_the_ifile_gets_the_gfiles_lcfs_pressure_and_pad(tmp_path):
         np.testing.assert_allclose(d["p"], 1e4 * d["psi"] + p_sep)
 
 
+def test_theta_sampling_reaches_the_save_and_stamps_the_sampling_written(tmp_path):
+    from bouquet.utils import save_state_ifile
+    gs = _RecordingGS()
+    kw = dict(npsi=9, ntheta=4, psi_pad=1e-3, p_sep=0.0)
+    _, rec = save_state_ifile(gs, str(tmp_path / "u.ifile"), **kw)
+    assert "theta_sampling" not in gs.calls[0][1] and "ifile_theta_sampling" not in rec
+    for diverted, written in ((True, "xpoint"), (False, "uniform")):
+        gs.calls.clear()
+        gs.diverted = diverted
+        _, rec = save_state_ifile(gs, str(tmp_path / f"{diverted}.ifile"), theta_sampling="auto", **kw)
+        c = gs.calls[0][1]
+        assert (c["theta_sampling"], c["xpoint_amp"], c["xpoint_width"]) == ("auto", 7.0, 0.1)
+        assert (rec["ifile_theta_sampling"], rec["ifile_xpoint_amp"]) == (written, 7.0)
+
+
 def test_the_extended_records_reach_the_save_and_the_reader(tmp_path):
     from bouquet.utils import read_ifile, save_state_ifile
     gs = _RecordingGS()
