@@ -231,7 +231,8 @@ class SwbBaseline:
 
     def _swb_saw_kwargs(self):
         """``solve_with_bootstrap`` sawtooth-reset arguments; empty when
-        ``swb_saw_q`` is None (saw_drop / saw_width only when swb_saw_width > 0)."""
+        ``swb_saw_q`` is None (saw_drop / saw_width only when swb_saw_width > 0, saw_shear
+        only with the "shear" rule)."""
         from .config import SWB_SAW_RULES
         gc, bl = self.config.generation, self.baseline
         if gc.swb_saw_q is None:
@@ -244,7 +245,8 @@ class SwbBaseline:
                     saw_tol=float(gc.swb_saw_tol), saw_ramp=float(gc.swb_saw_ramp),
                     saw_rule=SWB_SAW_RULES[gc.swb_saw_rule],
                     **(dict(saw_drop=float(gc.swb_saw_drop), saw_width=float(gc.swb_saw_width))
-                       if gc.swb_saw_width > 0.0 else {}))
+                       if gc.swb_saw_width > 0.0 else {}),
+                    **(dict(saw_shear=float(gc.swb_saw_shear)) if gc.swb_saw_rule == "shear" else {}))
 
     def _swb_solve(self, kin, j_seed, coil_reg_target=None, warm_eq=None):
         """:meth:`_swb_solve_once`; with ``swb_saw_flatten``, repeated on the

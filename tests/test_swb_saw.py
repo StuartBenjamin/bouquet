@@ -331,8 +331,8 @@ def test_saw_names_are_real_toolkit_arguments():
     """Against an installed saw toolkit: the reserved names exist (no typo)."""
     from bouquet.config import _bootstrap_kwarg_names
     known = _bootstrap_kwarg_names()
-    if known is None or "saw_width" not in known:
-        pytest.skip("needs an OpenFUSIONToolkit with saw_width")
+    if known is None or "saw_shear" not in known:
+        pytest.skip("needs an OpenFUSIONToolkit with saw_shear")
     assert GenerationConfig._SAW_RESERVED <= known and "saw_relax" in known
 
 
@@ -342,7 +342,17 @@ def test_saw_blend_widths_go_to_the_toolkit_only_when_set():
         config=types.SimpleNamespace(generation=GenerationConfig(swb_saw_q=1.02, **g)), baseline=bl))
     assert not {"saw_drop", "saw_width"} & set(kw())                         # an older toolkit still works
     on = kw(swb_saw_drop=0.04, swb_saw_width=0.3)
-    assert (on["saw_drop"], on["saw_width"], on["saw_rule"]) == (0.04, 0.3, 2)
+    assert (on["saw_drop"], on["saw_width"], on["saw_rule"]) == (0.04, 0.3, 2) and "saw_shear" not in on
+    sh = kw(swb_saw_rule="shear", swb_saw_shear=0.2, swb_saw_width=0.05)
+    assert (sh["saw_rule"], sh["saw_shear"], sh["saw_width"], sh["saw_drop"]) == (3, 0.2, 0.05, 0.0)
+
+
+def test_saw_shear_rule_settings_are_checked():
+    for bad in (dict(swb_saw_rule="shear", swb_saw_shear=0.2),                       # no width
+                dict(swb_saw_rule="shear", swb_saw_shear=0.2, swb_saw_width=0.3, swb_saw_drop=0.04),
+                dict(swb_saw_shear=0.2)):                                             # shear on another rule
+        with pytest.raises(ValueError, match="swb_saw"):
+            GenerationConfig(swb_saw_q=1.02, **bad)
 
 
 # ---- review fixes: phi_n, taper identity, sigma=0 mismatch, jphi_saw map check ----

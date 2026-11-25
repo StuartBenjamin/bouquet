@@ -928,7 +928,7 @@ class UncertaintyConfig:
 
 
 #: GenerationConfig.swb_saw_rule -> OFT boot_ops saw_rule.
-SWB_SAW_RULES = {"fuse": 1, "local": 2}
+SWB_SAW_RULES = {"fuse": 1, "local": 2, "shear": 3}
 
 # ---------------------------------------------------------------------------
 # Generation + filtering
@@ -1675,7 +1675,8 @@ class GenerationConfig:
     # Baseline.jphi_saw becomes SWB's jphi_saw input.  swb_saw_dq / _tol /
     # _ramp map onto OFT's saw_dq / saw_tol / saw_ramp, swb_saw_rule onto
     # saw_rule ("local": each dip below swb_saw_q; "fuse": axis to the mixing
-    # radius).  saw_relax goes via bootstrap_kwargs.
+    # radius; "shear": q held >= swb_saw_q and dq/drho >= swb_saw_shear over each dip,
+    # rejoining over swb_saw_width).  saw_relax goes via bootstrap_kwargs.
     swb_saw_q: Optional[float] = None
     swb_saw_dq: float = 0.03
     swb_saw_tol: float = 1.0e-4
@@ -1687,6 +1688,8 @@ class GenerationConfig:
     # before (passed only when swb_saw_width > 0).
     swb_saw_drop: float = 0.0
     swb_saw_width: float = 0.0
+    # OFT saw_shear: the "shear" rule's minimum dq/drho (rho = sqrt(Phi_N)).
+    swb_saw_shear: float = 0.0
     # swb_saw_q only.  Pressure flattening inside the core edge, the outermost
     # crossing of q = swb_saw_q + swb_saw_dq (the reset's rho_m where it fires;
     # swb.swb_saw_flatten): n_e, T_e, n_i, T_i, Z_eff and p_fixed (fast +
@@ -2110,7 +2113,7 @@ class GenerationConfig:
 
     #: Set from the ``swb_saw_*`` fields, never from ``bootstrap_kwargs``.
     _SAW_RESERVED = frozenset(
-        "jphi_saw saw_q_s saw_dq saw_tol saw_ramp saw_rule saw_drop saw_width".split())
+        "jphi_saw saw_q_s saw_dq saw_tol saw_ramp saw_rule saw_drop saw_width saw_shear".split())
 
     def _validate_bootstrap_kwargs(self, value):
         """:func:`validate_bootstrap_kwargs` with this config's reserved
@@ -2194,10 +2197,15 @@ class GenerationConfig:
             raise ValueError(f"swb_saw_ramp={self.swb_saw_ramp!r} must be >= 0")
         if self.swb_saw_rule not in SWB_SAW_RULES:
             raise ValueError(f"swb_saw_rule={self.swb_saw_rule!r} not in {tuple(SWB_SAW_RULES)}")
-        if not ((self.swb_saw_drop, self.swb_saw_width) == (0.0, 0.0)
-                or (0.0 < self.swb_saw_drop < self.swb_saw_width and self.swb_saw_rule == "local")):
-            raise ValueError(f"swb_saw_drop={self.swb_saw_drop!r}, swb_saw_width={self.swb_saw_width!r}: both 0, "
-                             "or 0 < drop < width with swb_saw_rule 'local'")
+        if self.swb_saw_rule == "shear":
+            if not (self.swb_saw_width > 0.0 and self.swb_saw_drop == 0.0 and self.swb_saw_shear >= 0.0):
+                raise ValueError("swb_saw_rule 'shear' needs swb_saw_width > 0, swb_saw_drop 0 and swb_saw_shear >= 0")
+        elif self.swb_saw_shear != 0.0 or not ((self.swb_saw_drop, self.swb_saw_width) == (0.0, 0.0)
+                                               or (0.0 < self.swb_saw_drop < self.swb_saw_width
+                                                   and self.swb_saw_rule == "local")):
+            raise ValueError(f"swb_saw_drop={self.swb_saw_drop!r}, swb_saw_width={self.swb_saw_width!r}, "
+                             f"swb_saw_shear={self.swb_saw_shear!r}: drop and width both 0, or 0 < drop < width "
+                             "with swb_saw_rule 'local'; swb_saw_shear only with 'shear'")
         if self.core_gradient_reference not in ("baseline", "input"):
             raise ValueError(f"core_gradient_reference={self.core_gradient_reference!r} not in ('baseline', 'input')")
         if not float(self.swb_saw_flatten_width) >= 0.0:
