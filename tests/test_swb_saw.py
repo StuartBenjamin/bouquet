@@ -210,7 +210,7 @@ def fake_swb(monkeypatch, saw_oft):
     return calls
 
 
-_METHODS = ("_swb_source_split", "_swb_saw_kwargs", "_swb_solve", "_swb_solve_once", "_swb_split",
+_METHODS = ("_swb_source_split", "_swb_saw_kwargs", "_swb_solve", "_swb_split",
             "_swb_state", "_swb_imas_baseline", "_verify_sigma0_swb", "_zeff_eq")
 
 
@@ -630,66 +630,47 @@ def test_the_swb_split_is_archived_as_the_third_bucket(tmp_path):
         assert hf["scan/k/3"].attrs["swb_ip_rel_err"] == 1e-5
 
 
-# ---- pressure flattening inside rho_m (swb_saw_flatten) ----------------------
-def _kin(x):
-    ne = 1.0 + (1.0 - x) ** 2
-    return dict(ne=ne, te=2.0 - x, ni=0.9 * ne, ti=1.5 - x, Zeff=1.5 + 0.2 * x, p_fixed=1.0 - x)
+# ---- pressure flattening inside OFT (swb_saw_flatten) -------------------------
+class _PressureGS(_GS):
+    """_GS with a solved pressure 1e4 (1 - psi), zero on the LCFS as OFT's."""
+
+    def get_profiles(self, psi=None, npsi=None, psi_pad=None):
+        p = self._p(psi, npsi, psi_pad)
+        return p, 3.4 + 0 * p, 0 * p, 1e4 * (1.0 - p), 0 * p
 
 
-def test_flatten_keeps_the_contents():
-    x = np.linspace(0.0, 1.0, 2001)
-    V = x ** 1.5                                   # any enclosed volume, 0 on the axis
-    kin, x_m = _kin(x), 0.3
-    inside = x < x_m
-    vol = swb_mod.swb_saw_flatten(kin, x, V, x_m)
-    for k, v in kin.items():
-        assert np.array_equal(vol[k][~inside], v[~inside]) and np.ptp(vol[k][inside]) == 0.0
-    S = lambda a: np.trapezoid(np.where(inside, a, 0.0), V)          # noqa: E731
-    for a, b in (("ne", None), ("ni", None), ("p_fixed", None), ("ne", "te"), ("ni", "ti"), ("ne", "Zeff")):
-        f = lambda d: d[a] * (d[b] if b else 1.0)                    # noqa: E731
-        assert S(f(vol)) == pytest.approx(S(f(kin)), rel=2e-3)       # particles, energy, sum n Z^2 kept
-    wid = swb_mod.swb_saw_flatten(kin, x, V, x_m, width=0.1)         # rejoins at rho_m + 0.1
-    out, S2 = x >= (np.sqrt(x_m) + 0.1) ** 2, lambda a: np.trapezoid(np.where(x < (np.sqrt(x_m) + 0.1) ** 2, a, 0.0), V)
-    for k, v in kin.items():
-        assert np.ptp(wid[k][inside]) < 1e-12 and np.array_equal(wid[k][out], v[out])
-    assert S2(wid["ne"] * wid["te"]) == pytest.approx(S2(kin["ne"] * kin["te"]), rel=2e-3)
-    assert np.abs(np.diff(wid["ne"])).max() < 0.2 * np.abs(np.diff(vol["ne"])).max()   # no step left
+def test_flatten_is_oft_s_and_the_baseline_archives_what_it_solved_with(fake_swb):
+    from bouquet.physics import ELEMENTARY_CHARGE as EC
+    swb0, flat = sys.modules["OpenFUSIONToolkit.TokaMaker.bootstrap"].solve_with_bootstrap, dict(
+        ne_flat=2e19, te_flat=0.8, ni_flat=1.8e19, ti_flat=0.7, zeff_flat=1.4)        # OFT's units: keV
+    _swap_swb(lambda *a, **kw: dict(swb0(*a, **kw), saw_flat_rho=0.25, **{k: v + 0 * kw["x"] for k, v in flat.items()}))
+    ns, got = _run(swb_saw_q=1.02, swb_saw_rule="shear", swb_saw_width=0.05, swb_saw_flatten="volume",
+                   swb_saw_flatten_drop=0.04, swb_saw_flatten_width=0.5), {}
+    ns.mygs, ns._finish_imas_baseline = _PressureGS(), lambda nl, **k: got.update(k["ctx"])
+    ns._swb_imas_baseline()
+    assert all((kw["saw_flatten"], kw["saw_flatten_drop"], kw["saw_flatten_width"]) == ("volume", 0.04, 0.5)
+               for kw in fake_swb)                                                  # solves A and B
+    x = ns.baseline.psi_N
+    pn = np.clip(x, 1e-4, 1.0 - 1e-4)
+    p = 1e4 * (pn[-1] - pn) + EC * (2e19 * 800.0 + 1.8e19 * 700.0)    # the equilibrium's + the edge's (p_fixed 0)
+    np.testing.assert_allclose(got["p_total"], p, rtol=1e-12)                             # the archived baseline
+    np.testing.assert_allclose(got["p_components"]["electron_thermal"], EC * 2e19 * 800.0, rtol=1e-14)
+    np.testing.assert_allclose(ns.baseline.swb_baseline["p_solved"], p, rtol=1e-12)
 
 
-def test_flatten_gradient_leaves_the_core_and_rejoins_smoothly():
-    x = np.linspace(0.0, 1.0, 2001)
-    V = x ** 1.5
-    kin, x_m = _kin(x), 0.09
-    r, r_m = np.sqrt(x), 0.3
-    sm = swb_mod.swb_saw_flatten(kin, x, V, x_m, width=0.5, drop=0.04)   # drop-off 0.04, rejoin at rho_m + 0.5
-    kinked = swb_mod.swb_saw_flatten(kin, x, V, x_m, width=0.5)           # drop 0: the gradient jumps at rho_m
-    out = r >= r_m + 0.5
-    for k, v in kin.items():
-        assert np.ptp(sm[k][x < x_m]) < 1e-12 and np.array_equal(sm[k][out], v[out])
-    for a, b in (("ne", None), ("p_fixed", None), ("ne", "te"), ("ni", "ti"), ("ne", "Zeff")):
-        f = lambda d: d[a] * (d[b] if b else 1.0)                    # noqa: E731
-        assert np.trapezoid(f(sm), V) == pytest.approx(np.trapezoid(f(kin), V), rel=1e-12)   # whole plasma kept
-    bend = lambda a: np.abs(np.diff(np.diff(a) / np.diff(r), 2)).max()   # noqa: E731
-    assert bend(sm["ne"]) < 0.05 * bend(kinked["ne"])
+def test_a_flattened_draw_archives_the_kinetics_oft_solved_with():
+    x, xk = np.linspace(0.0, 1.0, 17), np.linspace(0.0, 1.25, 21)        # the kinetic grid reaches past the LCFS
+    prof = 2.0 - xk ** 2
+    flat = {k: np.where(x < 0.3, 0.5, 2.0 - x ** 2) for k in ("ne", "te", "ni", "ti")}
 
-
-def test_flatten_repeats_until_the_core_edge_settles(monkeypatch):
-    x = np.linspace(0.0, 1.0, 101)
-    edges, seen = iter([0.3 ** 2, 0.32 ** 2, 0.3205 ** 2]), []    # q = 1.07 (= 1.02 + 0.05) crossings
-
-    def once(kin, j_seed, coil_reg_target, warm_eq):
-        seen.append(kin)
-        return {}
-
-    monkeypatch.setattr(swb_mod, "_swb_q_volume", lambda mygs, x, coord: (1.0 + 0.07 * x / next(edges), x))
-    stub = types.SimpleNamespace(config=types.SimpleNamespace(generation=GenerationConfig(
-        swb_saw_q=1.02, swb_saw_dq=0.05, swb_saw_flatten="volume")), baseline=types.SimpleNamespace(psi_N=x, coord="phi_n"),
-        mygs=None, _swb_solve_once=once)
-    res = Bouquet._swb_solve(stub, _kin(x), np.ones_like(x))
-    assert len(seen) == 3 and seen[0]["ne"][0] == _kin(x)["ne"][0]   # first solve unflattened
-    assert res["saw_flat"]["rho_m"] == pytest.approx(0.32) and res["saw_flat"]["repeats"] == 2
-    assert np.ptp(seen[2]["ne"][x < 0.32 ** 2]) == 0.0 and seen[1]["ne"][x < 0.3 ** 2][0] != seen[2]["ne"][0]
-    assert swb_mod.core_edge(x, 1.2 + x, 1.07) is None               # no core: not flattened
+    def recipe(kin, j_seed):
+        return {"jphi_ind": j_seed, "jphi_bs": 0 * x, "jphi_total": j_seed, "saw_flat": {"rho_m": 0.55, "kin": flat}}
+    out = SD.swb_draw(None, x, None, prof, prof, prof, prof, None, None, None, None, None, 0.5, 0.4, 0.25,
+                      1.5 + 0 * x, 1.0 + 0 * x, recipe, coord="psi_n", rng=0, p_thresh=0.05, psi_N_kinetic=xk)
+    for a in out[:4]:
+        np.testing.assert_allclose(a[:17], flat["ne"], rtol=1e-14)        # OFT's, at the shared nodes
+        np.testing.assert_array_equal(a[17:], prof[17:])                    # outside the LCFS: as drawn
+    assert out[6]["saw_flat_rho_m"] == 0.55
 
 
 def test_pressure_scale_hands_oft_the_scaled_pressure_and_keeps_the_kinetics(fake_swb):
@@ -708,8 +689,17 @@ def test_pressure_scale_hands_oft_the_scaled_pressure_and_keeps_the_kinetics(fak
         GenerationConfig(swb_pressure_scale=0.0)                                   # OFT refuses a flat pressure
 
 
-def test_flatten_needs_the_reset():
-    assert any("swb_saw_flatten needs" in m for m in swb_config_problems(_cfg(swb_saw_flatten="volume")))
+def test_flatten_needs_the_shear_floor_reset_and_a_toolkit_with_it(monkeypatch):
+    import bouquet.config as C
+    on = dict(swb_saw_q=1.02, swb_saw_rule="shear", swb_saw_width=0.05, swb_saw_flatten="volume",
+              swb_saw_flatten_width=0.5)
+    needs = lambda **g: any("swb_saw_flatten needs" in m for m in swb_config_problems(_cfg(**g)))   # noqa: E731
+    assert not needs(**on)
+    assert all(needs(**dict(on, **bad)) for bad in (dict(swb_saw_q=None), dict(swb_saw_rule="fuse", swb_saw_width=0.0),
+                                                     dict(swb_saw_flatten_width=0.0)))
+    assert any("swb_pressure_scale" in m for m in swb_config_problems(_cfg(**on, swb_pressure_scale=0.5)))
+    monkeypatch.setattr(C, "_bootstrap_kwarg_names", lambda: frozenset({"saw_q_s"}))
+    assert any("lacks saw_flatten" in m for m in swb_config_problems(_cfg(**on)))
     with pytest.raises(ValueError, match="swb_saw_flatten"):
         GenerationConfig(swb_saw_flatten="mean")
     with pytest.raises(ValueError, match="swb_saw_flatten_drop"):

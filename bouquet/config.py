@@ -1690,17 +1690,14 @@ class GenerationConfig:
     swb_saw_width: float = 0.0
     # OFT saw_shear: the "shear" rule's minimum dq/drho (rho = sqrt(Phi_N)).
     swb_saw_shear: float = 0.0
-    # swb_saw_q only.  Pressure flattening inside the core edge, the outermost
-    # crossing of q = swb_saw_q + swb_saw_dq (the reset's rho_m where it fires;
-    # swb.swb_saw_flatten): n_e, T_e, n_i, T_i, Z_eff and p_fixed (fast +
-    # impurity) made flat inside it, and the solve repeated until it settles.
-    # "volume" (the one rule): volume averages (densities, n T and p_fixed;
-    # Z_eff weighted by n_e), so particles and stored energy are kept.  None: off.
+    # swb_saw_rule "shear" only.  OFT saw_flatten, inside the solve: n_e, n_i
+    # and the pressure flat at their volume averages (T_e, T_i, Z_eff through
+    # n_e T_e, n_i T_i, n_e Z_eff) inside OFT's radius, where q is at the
+    # floor, the reset holding q there.  "volume" (the one rule).  None: off.
     swb_saw_flatten: Optional[str] = None
-    # Widths in rho = sqrt(x) (swb.swb_saw_flatten): the gradient leaves the
-    # flat core within swb_saw_flatten_drop and rejoins the profile's at
-    # rho_m + swb_saw_flatten_width, with continuous slope at both joins
-    # (drop 0: a kink at rho_m); width 0: a step there.
+    # OFT saw_flatten_drop / saw_flatten_width (rho = sqrt(Phi_N), 0 <= drop <
+    # width): the gradient leaves the flat core within the drop and rejoins the
+    # profile's at the radius + width, with continuous slope at both joins.
     swb_saw_flatten_width: float = 0.0
     swb_saw_flatten_drop: float = 0.0
     # swb only.  The pressure the GS solve uses, as a fraction of the kinetic +
@@ -2597,8 +2594,14 @@ def swb_config_problems(config):
     from .coords import _swb_grid_arg, _swb_params
     if not _swb_grid_arg() or not {"jphi_fixed", "p_fixed"} <= _swb_params():
         p.append("this OpenFUSIONToolkit's solve_with_bootstrap lacks x/jphi_fixed/p_fixed")
-    if gc.swb_saw_flatten is not None and gc.swb_saw_q is None:
-        p.append("swb_saw_flatten needs the sawtooth reset (swb_saw_q)")
+    if gc.swb_saw_flatten is not None:
+        if gc.swb_saw_q is None or gc.swb_saw_rule != "shear" or not gc.swb_saw_flatten_width > 0.0:
+            p.append("swb_saw_flatten needs the shear-floor reset (swb_saw_q, swb_saw_rule 'shear') "
+                     "and swb_saw_flatten_width > 0")
+        if gc.swb_pressure_scale != 1.0:
+            p.append("swb_saw_flatten with swb_pressure_scale != 1 is not supported")
+        if "saw_flatten" not in (_bootstrap_kwarg_names() or {"saw_flatten"}):
+            p.append("swb_saw_flatten: this OpenFUSIONToolkit's solve_bootstrap lacks saw_flatten")
     if gc.swb_saw_q is not None and "jphi_saw" not in _swb_params():
         p.append("swb_saw_q: this OpenFUSIONToolkit's solve_with_bootstrap lacks jphi_saw")
     if (gc.swb_saw_q is not None and isinstance(config.source, ImasSource)

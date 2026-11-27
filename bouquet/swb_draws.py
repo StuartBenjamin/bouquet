@@ -160,11 +160,11 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
         check_draw_kinetics(dict(kin, zeff=Zeff), psi_N, "swb draw")
     res = swb_recipe(kin, j_seed)
     flat = res.get("saw_flat") or {}
-    if flat.get("kin") is not None:   # swb_saw_flatten: the kinetics the solve used, kinetic grid too
-        from .swb import swb_saw_flatten
-        f = swb_saw_flatten(dict(ne=ne_p, te=te_p, ni=ni_p, ti=ti_p), psi_kin,
-                            np.interp(psi_kin, psi_N, flat["V"]), flat["x_m"], flat["width"], flat["drop"])
-        ne_p, te_p, ni_p, ti_p = f["ne"], f["te"], f["ni"], f["ti"]
+    if flat.get("kin") is not None:   # swb_saw_flatten: the kinetics OFT solved with, on the kinetic grid too
+        ne_p, te_p, ni_p, ti_p = (p + (flat["kin"][k] - e if psi_N_kinetic is None else
+                                       regrid(psi_N, flat["kin"][k] - e, psi_kin, kin_regrid))
+                                  for k, p, e in (("ne", ne_p, ne_eq), ("te", te_p, te_eq),
+                                                  ("ni", ni_p, ni_eq), ("ti", ti_p, ti_eq)))
     # the recipe returns bouquet's split (Bouquet._swb_split): jphi_bs the
     # field-aligned bootstrap, jphi_pd the third bucket, SWB's own
     # inductive (alpha's) as swb_raw_jphi_ind
@@ -208,7 +208,7 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
         if res.get("saw_map_warn") is not None:
             diagnostics["saw_map_warn"] = bool(res["saw_map_warn"])
     if flat:
-        diagnostics.update(saw_flat_rho_m=flat["rho_m"], saw_flat_repeats=flat["repeats"])
+        diagnostics["saw_flat_rho_m"] = flat["rho_m"]
     if res.get("p_solved") is not None:          # flattened or scaled: the pressure the solve used
         diagnostics["swb_p_solved"] = res["p_solved"]
     return (ne_p, te_p, ni_p, ti_p, np.zeros_like(psi_N),
@@ -372,7 +372,6 @@ class SwbDraws(DrawMethod):
             "swb_saw_n_dips": diagnostics.get("saw_n_dips"),
             "swb_saw_map_warn": diagnostics.get("saw_map_warn"),
             "swb_saw_flat_rho_m": diagnostics.get("saw_flat_rho_m"),
-            "swb_saw_flat_repeats": diagnostics.get("saw_flat_repeats"),
             **(diagnostics.get("core_band_attrs") or {})})
 
     # ---- Bouquet.generate -------------------------------------------------

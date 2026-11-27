@@ -33,58 +33,10 @@ _SWB_SAW_KEYS = ("jphi_saw_out", "saw_rho_m", "saw_rho_out", "saw_n_dips")
 #: swb_saw_q: with no reset (saw_n_dips 0) warn when max|jphi_saw_out - jphi_saw| exceeds
 #: this fraction of max|jphi_total| (an OFT mis-mapping jphi_saw; also frozen-saw reporting).
 SWB_SAW_MAP_TOL = 1e-3
-#: swb_saw_flatten: the solve is repeated until the core edge's rho moves by at most this, at most SWB_FLAT_MAXIT times.
-SWB_FLAT_TOL = 1e-3
-SWB_FLAT_MAXIT = 6
-#: swb_saw_flatten: profiles kept as contents with a density weight (T_e: n_e T_e, T_i: n_i T_i,
-#: Z_eff: n_e Z_eff).
-_FLAT_WEIGHT = {"te": "ne", "ti": "ni", "Zeff": "ne"}
-
-
-def _smooth_step(t):
-    """0 for t <= 0, 1 for t >= 1, C2 between (smootherstep)."""
-    t = np.clip(t, 0.0, 1.0)
-    return t ** 3 * (10.0 - 15.0 * t + 6.0 * t * t)
-
-
-def _gradient_blend(c, r, r_m, drop, width):
-    """``(P, Q)`` on the nodes ``r``: P - A Q (any A) is ``c`` flat inside ``r_m`` with node steps
-    s_in dc + A s_in (1 - s_out) dr outside, s_in a C2 step over r_m .. r_m + drop (0: a step at r_m),
-    s_out over r_m .. r_m + width: the gradient leaves the flat core within ``drop`` and rejoins c's
-    at r_m + width, with continuous slope at both joins."""
-    rh = 0.5 * (r[1:] + r[:-1])
-    s_in = _smooth_step((rh - r_m) / drop) if drop > 0.0 else (rh > r_m).astype(float)
-    tail = lambda a: np.r_[np.cumsum(a[::-1])[::-1], 0.0]       # noqa: E731
-    return c + tail((1.0 - s_in) * np.diff(c)), tail(s_in * (1.0 - _smooth_step((rh - r_m) / width)) * np.diff(r))
-
-
-def swb_saw_flatten(kin, x, V, x_m, width=0.0, drop=0.0):
-    """``kin`` (``ne te ni ti Zeff p_fixed`` on the grid ``x``) made flat inside
-    ``x_m`` (``GenerationConfig.swb_saw_flatten``), ``V`` the enclosed volume
-    on ``x`` (any constant factor, 0 on the axis), keeping the densities and
-    p_fixed as they are and T_e, T_i, Z_eff through n_e T_e, n_i T_i, n_e
-    Z_eff (particles, stored energy, sum n Z^2): ``width`` 0, inside ``x_m``
-    (their volume averages there, a step at ``x_m``); ``width``
-    (``swb_saw_flatten_width``, in rho = sqrt(x)) > 0, over rho <= rho_m +
-    width, the gradient leaving the flat core within ``drop``
-    (``swb_saw_flatten_drop``) and rejoining the profile's at rho_m + width
-    (:func:`_gradient_blend`).  Any subset of the keys (a weighted one with its
-    weight)."""
-    x = np.asarray(x, dtype=float)
-    kin = {k: np.asarray(v, dtype=float) for k, v in kin.items()}
-    V = np.asarray(V, dtype=float)
-    r, r_m = np.sqrt(np.clip(x, 0.0, None)), float(np.sqrt(x_m))
-    inside = x < x_m
-
-    def keep(c):
-        if width > 0.0:
-            P, Q = _gradient_blend(c, r, r_m, drop, width)
-            return P - (np.trapezoid(P, V) - np.trapezoid(c, V)) / np.trapezoid(Q, V) * Q
-        xs = np.r_[x[inside], x_m]
-        return np.where(inside, np.trapezoid(np.interp(xs, x, c), np.interp(xs, x, V)) / np.interp(x_m, x, V), c)
-    out = {k: keep(kin[_FLAT_WEIGHT[k]] * v) / keep(kin[_FLAT_WEIGHT[k]]) if k in _FLAT_WEIGHT else keep(v)
-           for k, v in kin.items()}
-    return {k: np.where(r < r_m + width, out[k], v) for k, v in kin.items()}
+#: swb_saw_flatten (OFT saw_flatten): the kinetics OFT's solve used, its result key and the factor to
+#: bouquet's units (OFT's T in keV).
+_OFT_FLAT_KEYS = {"ne": ("ne_flat", 1.0), "te": ("te_flat", 1e3), "ni": ("ni_flat", 1.0),
+                  "ti": ("ti_flat", 1e3), "Zeff": ("zeff_flat", 1.0)}
 
 
 def swb_pressure(kin):
@@ -103,25 +55,17 @@ def swb_pressure_kwargs(kin, x, scale=1.0):
                 allow_pres_below_kinetic=True)
 
 
-def core_edge(x, q, q_core):
-    """Outermost crossing of ``|q| = q_core`` on the grid ``x`` (None when q is
-    above ``q_core`` everywhere or up to the last node)."""
-    x, q = np.asarray(x, dtype=float), np.abs(np.asarray(q, dtype=float))
-    i = np.flatnonzero(q <= q_core)
-    if not i.size or i[-1] == x.size - 1:
-        return None
-    i = i[-1]
-    return float(x[i] + (q_core - q[i]) * (x[i + 1] - x[i]) / (q[i + 1] - q[i]))
-
-
-def _swb_q_volume(mygs, x, coord):
-    """``(q, V)`` on the run grid ``x`` of ``mygs``'s last solve: the safety
-    factor and the enclosed volume (up to a constant factor)."""
-    from .physics import q_ravg
+def swb_flat_kinetics(res, mygs, x, coord, kin):
+    """``swb_saw_flatten``: the kinetics OFT's flattened solve used (bouquet's names and units, on the
+    run grid ``x``), p_fixed the solved pressure less their thermal part: the equilibrium's pressure
+    (zero on the LCFS) plus the edge's flattened thermal part and ``kin``'s p_fixed."""
+    from .physics import ELEMENTARY_CHARGE
+    flat = {k: f * np.asarray(res[n], dtype=float) for k, (n, f) in _OFT_FLAT_KEYS.items()}
+    th = ELEMENTARY_CHARGE * (flat["ne"] * flat["te"] + flat["ni"] * flat["ti"])
     pn = np.clip(np.asarray(coords.psi_at(mygs, x, coord), dtype=float), 1e-4, 1.0 - 1e-4)
-    _, q, geo, *_ = mygs.get_q(psi=pn, compute_geo=True)
-    w = np.abs(np.asarray(q_ravg(geo, "dV/dPsi"), dtype=float))
-    return np.asarray(q, dtype=float), np.r_[0.0, np.cumsum(0.5 * (w[1:] + w[:-1]) * np.diff(pn))]
+    p = np.asarray(mygs.get_profiles(psi=pn)[3], dtype=float)
+    flat["p_fixed"] = p - p[-1] + th[-1] + float(np.asarray(kin["p_fixed"], dtype=float)[-1]) - th
+    return flat
 
 
 def swb_source_edge(x, seed, *others):
@@ -248,7 +192,7 @@ class SwbBaseline:
     def _swb_saw_kwargs(self):
         """``solve_with_bootstrap`` sawtooth-reset arguments; empty when
         ``swb_saw_q`` is None (saw_drop / saw_width only when swb_saw_width > 0, saw_shear
-        only with the "shear" rule)."""
+        only with the "shear" rule, saw_flatten and its widths only with swb_saw_flatten)."""
         from .config import SWB_SAW_RULES
         gc, bl = self.config.generation, self.baseline
         if gc.swb_saw_q is None:
@@ -262,46 +206,11 @@ class SwbBaseline:
                     saw_rule=SWB_SAW_RULES[gc.swb_saw_rule],
                     **(dict(saw_drop=float(gc.swb_saw_drop), saw_width=float(gc.swb_saw_width))
                        if gc.swb_saw_width > 0.0 else {}),
-                    **(dict(saw_shear=float(gc.swb_saw_shear)) if gc.swb_saw_rule == "shear" else {}))
+                    **(dict(saw_shear=float(gc.swb_saw_shear)) if gc.swb_saw_rule == "shear" else {}),
+                    **(dict(saw_flatten=gc.swb_saw_flatten, saw_flatten_drop=float(gc.swb_saw_flatten_drop),
+                            saw_flatten_width=float(gc.swb_saw_flatten_width)) if gc.swb_saw_flatten else {}))
 
     def _swb_solve(self, kin, j_seed, coil_reg_target=None, warm_eq=None):
-        """:meth:`_swb_solve_once`; with ``swb_saw_flatten``, repeated on the
-        kinetics flattened (:func:`swb_saw_flatten`) inside the last solve's core
-        edge -- the outermost crossing of q = swb_saw_q + swb_saw_dq (the reset's
-        rho_m where it fires; :func:`core_edge`) -- until its rho = sqrt(x)
-        settles.  The result then carries ``saw_flat``: the rule, the rho
-        flattened inside, the repeats and (when flattened) the flattened
-        ``kin``, its edge ``x_m`` and the volume ``V`` on ``psi_N``."""
-        res = self._swb_solve_once(kin, j_seed, coil_reg_target, warm_eq)
-        gc = self.config.generation
-        rule = gc.swb_saw_flatten
-        if rule is None:
-            return res
-        x = np.asarray(self.baseline.psi_N, dtype=float)
-        coord = getattr(self.baseline, "coord", coords.PSI)
-        q_core = float(gc.swb_saw_q) + float(gc.swb_saw_dq)
-        rho_used, flat = None, None
-        for n in range(SWB_FLAT_MAXIT + 1):
-            q, V = _swb_q_volume(self.mygs, x, coord)
-            x_1 = core_edge(x, q, q_core)
-            rho = 0.0 if x_1 is None else float(np.sqrt(x_1))
-            if rho <= 0.0 or (rho_used is not None and abs(rho - rho_used) <= SWB_FLAT_TOL):
-                break
-            if n == SWB_FLAT_MAXIT:
-                import warnings
-                warnings.warn(f"swb_saw_flatten: core edge rho {rho_used:.4f} -> {rho:.4f} after "
-                              f"{n} repeats (tol {SWB_FLAT_TOL:g})", RuntimeWarning, stacklevel=2)
-                break
-            flat, x_m = swb_saw_flatten(kin, x, V, x_1, gc.swb_saw_flatten_width, gc.swb_saw_flatten_drop), x_1
-            rho_used = rho
-            res = self._swb_solve_once(flat, j_seed, coil_reg_target, warm_eq)
-        if flat is not None:
-            res.setdefault("p_solved", swb_pressure(flat))
-        res["saw_flat"] = dict(rule=rule, width=gc.swb_saw_flatten_width, drop=gc.swb_saw_flatten_drop, rho_m=rho_used,
-                               repeats=n, kin=flat, **({} if flat is None else dict(x_m=x_m, V=V)))
-        return res
-
-    def _swb_solve_once(self, kin, j_seed, coil_reg_target=None, warm_eq=None):
         """The swb recipe: reset ``mygs`` -> coil reg -> ``init_psi`` from the
         slice LCFS -> one ``solve_with_bootstrap``.
 
@@ -312,7 +221,9 @@ class SwbBaseline:
         :meth:`_swb_imas_baseline`; :meth:`replay_swb`'s archived states).
         ``kin``: ``ne te ni ti Zeff p_fixed`` on ``psi_N``.  Returns the SWB
         result dict (its ``jphi_saw_out`` / ``saw_rho_m`` / ``saw_n_dips`` only
-        when ``swb_saw_q`` is set).
+        when ``swb_saw_q`` is set; with ``swb_saw_flatten``, OFT's flattening
+        inside the solve, ``saw_flat``: the rule, the widths, OFT's radius
+        ``rho_m`` and the kinetics it solved with, :func:`swb_flat_kinetics`).
         """
         from .oft_bootstrap import solve_with_bootstrap
         from .TokaMaker_interface import strong_coil_reg
@@ -368,6 +279,11 @@ class SwbBaseline:
         res["ip_rel_err"] = float(err)
         if "pres_prof" in p_kw:
             res["p_solved"] = p_kw["pres_prof"]["y"]
+        if gc.swb_saw_flatten is not None:
+            flat = swb_flat_kinetics(res, mygs, psi_N, getattr(bl, "coord", coords.PSI), kin)
+            res["p_solved"] = swb_pressure(flat)
+            res["saw_flat"] = dict(rule=gc.swb_saw_flatten, width=gc.swb_saw_flatten_width,
+                                   drop=gc.swb_saw_flatten_drop, rho_m=float(res["saw_flat_rho"]), kin=flat)
         return res
 
     def _swb_split(self, res, swb_fn, psi_N, coord):
