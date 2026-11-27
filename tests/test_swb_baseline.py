@@ -269,6 +269,38 @@ def test_edge_taper_keeps_the_channel_split(monkeypatch, swb_oft, taper, saw):
     assert np.array_equal(bl.jphi_other[fac == 1.0], j_oth[fac == 1.0])   # untapered: untouched
 
 
+def test_the_baseline_archives_the_pressure_its_solve_used(swb_oft):
+    """Flattened and scaled: the flattened kinetics' pressure x swb_pressure_scale, not the input's."""
+    x = coords.swb_grid(np.linspace(0.0, 1.0, 33))
+    one, z = np.ones_like(x), np.zeros_like(x)
+    bl = types.SimpleNamespace(psi_N=x, jphi_ind=one, jphi_bs=z, jphi_nbi=z, jphi_rf=z, jphi_other=z,
+                               jphi_saw=None, jphi_pd=z, jphi_total=one, li_metrics={})
+    kin = {k: 1.0 + x for k in ("ne", "te", "ni", "ti", "p_fixed")}
+    flat = {k: np.full_like(x, 1.5) for k in kin}
+    gen = types.SimpleNamespace(bootstrap_kwargs={}, swb_saw_q=None, swb_edge_taper_psi0=None,
+                                swb_pressure_scale=0.25)
+
+    def solve(k, seed, coil_reg_target=None, warm_eq=None):
+        return dict(jphi_ind=np.asarray(seed), jphi_bs=z, j_fixed=None, jphi_total=np.asarray(seed),
+                    saw_flat=dict(kin=flat))
+
+    def state(res, seed, psi_pad=1e-3):
+        return dict(alpha=1.0, coils={"F1A": 1.0}, lcfs=None, li_3=0.9, Ip=1e6, jphi_ind=res["jphi_ind"],
+                    jphi_bs=res["jphi_bs"], jphi_total=res["jphi_total"], j_fixed=None)
+    got = {}
+    ns = types.SimpleNamespace(baseline=bl, config=types.SimpleNamespace(
+                                   source=types.SimpleNamespace(psi_pad=1e-3), generation=gen),
+                               _swb_baseline_kinetics=lambda: kin, _swb_solve=solve, _swb_state=state,
+                               _finish_imas_baseline=lambda its, **k: got.update(k["ctx"]))
+    ns._swb_source_split = lambda psi_N: Bouquet._swb_source_split(ns, psi_N)
+    Bouquet._swb_imas_baseline(ns)
+    from bouquet.physics import ELEMENTARY_CHARGE as EC
+    np.testing.assert_allclose(got["p_total"], 0.25 * (EC * 2 * 1.5 ** 2 + 1.5), rtol=1e-14)
+    p_kin = kin["p_fixed"]                     # generate_bouquet archives solve_pressure's
+    assert SD.SwbDraws(None, one, z, p_solved=got["p_total"]).solve_pressure(x, p_kin) is got["p_total"]
+    assert SD.SwbDraws(None, one, z).solve_pressure(x, p_kin) is p_kin                 # default unchanged
+
+
 def test_edge_taper_is_opt_in(swb_oft):
     """D4 (owner decision 2026-10-09): the swb edge taper is opt-in.  Off
     (None, the default) is sent EXPLICITLY as taper_edge_jphi=False to a

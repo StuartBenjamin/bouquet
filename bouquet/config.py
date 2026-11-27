@@ -1703,6 +1703,12 @@ class GenerationConfig:
     # (drop 0: a kink at rho_m); width 0: a step there.
     swb_saw_flatten_width: float = 0.0
     swb_saw_flatten_drop: float = 0.0
+    # swb only.  The pressure the GS solve uses, as a fraction of the kinetic +
+    # p_fixed pressure (OFT pres_prof with allow_pres_below_kinetic); the
+    # bootstrap current still comes from the kinetics, so the current is kept
+    # (q moves with the shape).  1: off.  > 0: OFT refuses a flat pressure (a
+    # small value is the zero-pressure case).
+    swb_pressure_scale: float = 1.0
     # swb only.  OFT interpolation of the inductive jphi profile between its
     # nodes (OFT profile key 'interp'; P' inherits it): "cubic" (C2 spline;
     # an OFT with c2_profile_interp, the internal solve) or "linterp"; None
@@ -2222,6 +2228,8 @@ class GenerationConfig:
         if not (self.swb_saw_flatten_drop == 0.0 or 0.0 < self.swb_saw_flatten_drop < self.swb_saw_flatten_width):
             raise ValueError(f"swb_saw_flatten_drop={self.swb_saw_flatten_drop!r} must be 0 or in "
                              "(0, swb_saw_flatten_width)")
+        if not 0.0 < float(self.swb_pressure_scale) <= 1.0:
+            raise ValueError(f"swb_pressure_scale={self.swb_pressure_scale!r} must be in (0, 1]")
         if self.swb_saw_flatten not in (None, "volume"):
             raise ValueError(f"swb_saw_flatten={self.swb_saw_flatten!r} not in (None, 'volume')")
         if self.swb_jind_interp not in (None, "linterp", "cubic"):

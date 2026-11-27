@@ -196,8 +196,8 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
         # OFT's SWB solves with pax = p[0] - p[-1]: the separatrix pressure
         # the written g-file adds back (generate_bouquet's p_sep_applied)
         "edge_pressure": {"p_sep_applied": float(
-            ELEMENTARY_CHARGE * (ne_eq[-1] * te_eq[-1] + ni_eq[-1] * ti_eq[-1])
-            + kin["p_fixed"][-1])},
+            res["p_solved"][-1] if res.get("p_solved") is not None else
+            ELEMENTARY_CHARGE * (ne_eq[-1] * te_eq[-1] + ni_eq[-1] * ti_eq[-1]) + kin["p_fixed"][-1])},
     }
     if res.get("jphi_saw_out") is not None:      # swb_saw_q: the draw's own q reset
         diagnostics.update(jphi_saw_out=np.asarray(res["jphi_saw_out"], dtype=float),
@@ -208,8 +208,9 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
         if res.get("saw_map_warn") is not None:
             diagnostics["saw_map_warn"] = bool(res["saw_map_warn"])
     if flat:
-        diagnostics.update(saw_flat_rho_m=flat["rho_m"], saw_flat_repeats=flat["repeats"],
-                           swb_p_fixed=None if flat.get("kin") is None else flat["kin"]["p_fixed"])
+        diagnostics.update(saw_flat_rho_m=flat["rho_m"], saw_flat_repeats=flat["repeats"])
+    if res.get("p_solved") is not None:          # flattened or scaled: the pressure the solve used
+        diagnostics["swb_p_solved"] = res["p_solved"]
     return (ne_p, te_p, ni_p, ti_p, np.zeros_like(psi_N),
             np.asarray(res["jphi_total"], dtype=float), diagnostics)
 
@@ -239,7 +240,7 @@ class SwbDraws(DrawMethod):
     homotopy = False
 
     def __init__(self, recipe, jind_seed, sigma_jind, *, stamp=None,
-                 jphi_pd=None, jind_clip=False, core_bands=None, core_ref=None):
+                 jphi_pd=None, jind_clip=False, core_bands=None, core_ref=None, p_solved=None):
         #: the per-draw solve ``recipe(kin, j_seed)``: solve B's recipe
         self.recipe = recipe
         self.jind_seed = np.asarray(jind_seed, dtype=float)
@@ -252,6 +253,8 @@ class SwbDraws(DrawMethod):
                 "it -- every draw would be refused")
         #: the baseline's (solve B's) jphi_pd, archived on _baseline
         self.jphi_pd = jphi_pd
+        #: solve B's pressure when flattened or scaled (None: the kinetic assembly)
+        self.p_solved = p_solved
         #: the attrs stamped on _baseline (bouquet.swb.build_swb_context)
         self.stamp = dict(stamp or {})
         #: clip the seed redraw's negative nodes to 0 (swb_taper_source)
@@ -264,6 +267,9 @@ class SwbDraws(DrawMethod):
 
     def jphi_baseline(self, jphi_baseline):
         return False               # the prepared solve B IS the baseline
+
+    def solve_pressure(self, psi_N, pressure_solve):
+        return pressure_solve if self.p_solved is None else self.p_solved
 
     def draw(self, mygs, rng, scale, count, *, coil_guard=None, bnd_diag=None,
              solve_guard=None, inputs=None, legacy=None):
@@ -285,14 +291,13 @@ class SwbDraws(DrawMethod):
             jind_clip=self.jind_clip)
         if self.core_bands is not None:
             self._judge_core(out[5], out[6])
-        self._p_fixed = out[6].pop("swb_p_fixed", None)
+        self._p_solved = out[6].pop("swb_p_solved", None)
         return out
 
     def stored_pressures(self, thermal, total):
-        """With ``swb_saw_flatten``, the total the flattened solve used: the
-        (flattened) thermal plus its flattened ``p_fixed``."""
-        p = getattr(self, "_p_fixed", None)
-        return thermal, (total if p is None else thermal + p)
+        """With ``swb_saw_flatten`` or ``swb_pressure_scale``, the total the solve used."""
+        p = getattr(self, "_p_solved", None)
+        return thermal, (total if p is None else p)
 
     def _judge_core(self, jphi_total, diagnostics):
         """The core-current checks on the draw's solved jphi_total: the band

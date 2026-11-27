@@ -692,6 +692,22 @@ def test_flatten_repeats_until_the_core_edge_settles(monkeypatch):
     assert swb_mod.core_edge(x, 1.2 + x, 1.07) is None               # no core: not flattened
 
 
+def test_pressure_scale_hands_oft_the_scaled_pressure_and_keeps_the_kinetics(fake_swb):
+    ns, got = _run(swb_pressure_scale=1e-3), {}
+    ns._finish_imas_baseline = lambda nl, **k: got.update(k["ctx"])
+    ns._swb_imas_baseline()
+    kin = ns._swb_baseline_kinetics()
+    p = 1e-3 * swb_mod.swb_pressure(kin)
+    for kw in fake_swb:                                                            # solves A and B
+        assert kw["allow_pres_below_kinetic"] is True and "p_fixed" not in kw     # bootstrap from the kinetics
+        np.testing.assert_allclose(kw["pres_prof"]["y"], p, rtol=1e-15)
+    np.testing.assert_allclose(ns.baseline.swb_baseline["p_solved"], p, rtol=1e-15)   # replay's solve B
+    np.testing.assert_allclose(got["p_total"], p, rtol=1e-14)                        # the archived baseline
+    assert list(swb_mod.swb_pressure_kwargs(kin, kin["ne"])) == ["p_fixed"]          # 1: as before
+    with pytest.raises(ValueError, match="swb_pressure_scale"):
+        GenerationConfig(swb_pressure_scale=0.0)                                   # OFT refuses a flat pressure
+
+
 def test_flatten_needs_the_reset():
     assert any("swb_saw_flatten needs" in m for m in swb_config_problems(_cfg(swb_saw_flatten="volume")))
     with pytest.raises(ValueError, match="swb_saw_flatten"):

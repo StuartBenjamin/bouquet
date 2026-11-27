@@ -87,6 +87,22 @@ def swb_saw_flatten(kin, x, V, x_m, width=0.0, drop=0.0):
     return {k: np.where(r < r_m + width, out[k], v) for k, v in kin.items()}
 
 
+def swb_pressure(kin):
+    """The pressure SWB builds from ``kin``: OFT's eC(n_e T_e + n_i T_i) plus p_fixed."""
+    from .physics import ELEMENTARY_CHARGE
+    return ELEMENTARY_CHARGE * (kin["ne"] * kin["te"] + kin["ni"] * kin["ti"]) + np.asarray(kin["p_fixed"], dtype=float)
+
+
+def swb_pressure_kwargs(kin, x, scale=1.0):
+    """``solve_with_bootstrap``'s pressure arguments: ``p_fixed`` (``scale`` 1), or the
+    GS pressure ``scale`` x :func:`swb_pressure` as OFT's ``pres_prof`` below the kinetic
+    (``GenerationConfig.swb_pressure_scale``; the bootstrap still from the kinetics)."""
+    if scale == 1.0:
+        return dict(p_fixed=kin["p_fixed"])
+    return dict(pres_prof={"x": np.asarray(x, dtype=float), "y": scale * swb_pressure(kin)},
+                allow_pres_below_kinetic=True)
+
+
 def core_edge(x, q, q_core):
     """Outermost crossing of ``|q| = q_core`` on the grid ``x`` (None when q is
     above ``q_core`` everywhere or up to the last node)."""
@@ -279,6 +295,8 @@ class SwbBaseline:
             flat, x_m = swb_saw_flatten(kin, x, V, x_1, gc.swb_saw_flatten_width, gc.swb_saw_flatten_drop), x_1
             rho_used = rho
             res = self._swb_solve_once(flat, j_seed, coil_reg_target, warm_eq)
+        if flat is not None:
+            res.setdefault("p_solved", swb_pressure(flat))
         res["saw_flat"] = dict(rule=rule, width=gc.swb_saw_flatten_width, drop=gc.swb_saw_flatten_drop, rho_m=rho_used,
                                repeats=n, kin=flat, **({} if flat is None else dict(x_m=x_m, V=V)))
         return res
@@ -311,6 +329,7 @@ class SwbBaseline:
             mygs.init_psi(*_shape_from_boundary(self._geom.boundary_RZ))
             self._seed_coil_init(mygs)
         saw_kw = self._swb_saw_kwargs()
+        p_kw = swb_pressure_kwargs(kin, psi_N, float(gc.swb_pressure_scale))
         j_seed, jphi_fixed = np.asarray(j_seed, dtype=float), bl.jphi_fixed
         boot_kw = swb_bootstrap_kwargs(gc)
         interp = getattr(gc, "swb_jind_interp", None)
@@ -322,7 +341,7 @@ class SwbBaseline:
             j_seed if interp is None else {"x": psi_N, "y": j_seed, "interp": interp},
             scale_jbs=1.0, isolate_edge_jbs=bool(gc.isolate_edge_jbs),
             diagnostic_plots=False, verbose=False,
-            jphi_fixed=jphi_fixed, p_fixed=kin["p_fixed"],
+            jphi_fixed=jphi_fixed, **p_kw,
             **saw_kw,
             **coords.swb_grid_kwargs(psi_N, getattr(bl, "coord", coords.PSI)),
             **boot_kw)
@@ -347,6 +366,8 @@ class SwbBaseline:
                           f"above {SWB_IP_WARN:g} (the engine's acceptance), within "
                           f"swb_ip_tol={tol:g}", RuntimeWarning, stacklevel=2)
         res["ip_rel_err"] = float(err)
+        if "pres_prof" in p_kw:
+            res["p_solved"] = p_kw["pres_prof"]["y"]
         return res
 
     def _swb_split(self, res, swb_fn, psi_N, coord):
@@ -438,8 +459,9 @@ class SwbBaseline:
                      else np.asarray(res["j_fixed"], dtype=float)),
             ip_rel_err=res.get("ip_rel_err"),
             **{k: res[k] for k in ("swb_jbs_convention", "swb_jbs_conversion") if k in res})
-        if res.get("jphi_pd") is not None:
-            st["jphi_pd"] = np.asarray(res["jphi_pd"], dtype=float)
+        for k in ("jphi_pd", "p_solved"):      # p_solved: flattened or scaled (replay_swb's solve B)
+            if res.get(k) is not None:
+                st[k] = np.asarray(res[k], dtype=float)
         if res.get("jphi_saw_out") is not None:
             st.update(jphi_saw_out=np.asarray(res["jphi_saw_out"], dtype=float),
                       saw_rho_m=float(res["saw_rho_m"]),
@@ -560,11 +582,13 @@ class SwbBaseline:
                   f"n_dips {st_b['saw_n_dips']}, jphi_saw_out peak "
                   f"{np.max(np.abs(bl.jphi_saw_out))/1e6:.4f} MA/m^2 (input "
                   f"{np.max(np.abs(bl.jphi_saw_input))/1e6:.4f})")
-        # the pressure SWB solved with: the thermal part plus p_fixed
+        # the pressure SWB solved with: the thermal part plus p_fixed, as flattened and scaled
         from .physics import ELEMENTARY_CHARGE as _EC
-        _pth_e = _EC * kin["ne"] * kin["te"]
-        _pth_i = _EC * kin["ni"] * kin["ti"]
-        _pfix = np.asarray(kin["p_fixed"], dtype=float)
+        k = (res.get("saw_flat") or {}).get("kin") or kin
+        s = float(getattr(self.config.generation, "swb_pressure_scale", 1.0))
+        _pth_e = s * _EC * k["ne"] * k["te"]
+        _pth_i = s * _EC * k["ni"] * k["ti"]
+        _pfix = s * np.asarray(k["p_fixed"], dtype=float)
         self._finish_imas_baseline(-1, psi_pad=pad, ctx=dict(
             p_total=_pth_e + _pth_i + _pfix, psi_N=np.asarray(bl.psi_N, float),
             p_components={"electron_thermal": _pth_e, "ion_thermal": _pth_i,
@@ -742,7 +766,7 @@ def build_swb_context(bq, env, replay=None):
         partial(bq._swb_solve, coil_reg_target=bl.coil_reg_target, warm_eq=warm),
         np.asarray(bl.swb_seed_profile, dtype=float),
         swb_jind_sigma(env["sigma_jphi"], bl.jphi_total, bl.swb_seed_profile),
-        stamp=stamp, jphi_pd=getattr(bl, "jphi_pd", None),
+        stamp=stamp, jphi_pd=getattr(bl, "jphi_pd", None), p_solved=res_b.get("p_solved"),
         jind_clip=bool(getattr(gc, "swb_taper_source", False)),
         core_bands=resolve_inspec_bands(gc),
         core_ref=(np.asarray(bl.psi_N, dtype=float),
